@@ -53,10 +53,22 @@ class Storage:
         # 保留末端文件名，让执行锁仍能拒绝数据库文件本身的 symlink。
         self.path = configured.parent.resolve() / configured.name
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 多个线程/进程在 Barrier 同刻首次将 DELETE 日志切换为 WAL 时，SQLite 死锁检测可能
+        # 直接返回 database is locked 而不等待 busy_timeout；启动迁移做有界退避重试。
+        for attempt in range(8):
+            try:
+                self._initialize_schema()
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 7:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+
+    def _initialize_schema(self) -> None:
         with self._connect() as con:
+            con.execute("PRAGMA journal_mode=WAL")
             con.executescript(
                 """
-                PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, created_at TEXT NOT NULL, body TEXT NOT NULL
                 );
@@ -130,6 +142,7 @@ class Storage:
     def _connect(self):
         con = sqlite3.connect(self.path, timeout=10)
         con.row_factory = sqlite3.Row
+        con.execute("PRAGMA busy_timeout=10000")
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA synchronous=FULL")
         try:
