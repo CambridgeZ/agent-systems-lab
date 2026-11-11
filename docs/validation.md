@@ -61,7 +61,7 @@
 
 ## 本轮增强的远端验证结果
 
-上一阶段增强的 [GitHub Actions 运行 42982653696](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42982653696)（提交 `8f20646`）及本次 P0/P1 全量升级后的最新 `Validate` 工作流均在 Ubuntu Linux 上验证：
+本次 P0/P1 全量升级的 [GitHub Actions 运行 42994021180](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42994021180)（对应代码提交 `cb969de`；上一阶段见 [42982653696](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42982653696)）在 Ubuntu Linux 上全部通过：
 
 - Ubuntu / Python 3.11 与 3.12：全部 **273 项测试**、Ruff 检查（`src tests scripts`）和 10 个隔离离线场景通过。
 - 真实Docker：原始bug被捕获，审批后的修复通过四项受保护测试。
