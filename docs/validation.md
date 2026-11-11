@@ -6,11 +6,12 @@
 
 | 验证 | 结果 | 覆盖内容 |
 |---|---|---|
-| `pytest -q` | **273 passed** | 在原有 255 项基础上新增 Git worktree 与跨文件原子提案、测试驱动有界修复循环、队列租约续期与 `epoch` fencing、AST RepoMap 增量缓存、带 SHA-256 来源校验的工作记忆、5 任务编码基准与 OpenAI/Anthropic 适配器契约 |
+| `pytest -q` | **281 passed** | 在 273 项基础上新增 8 项 Harness 级 KV Cache 专项测试：多步前缀字节级不变性、跨任务 System 稳定对齐、高低水位阶梯压缩、多子代理根前缀共享、Anthropic 三断点 `cache_control` 与 OpenAI `prompt_cache_key` 契约 |
 | `ruff check src tests scripts` | 通过 | Python 静态检查 |
 | `node --check web/app.js` | 通过 | 浏览器脚本语法 |
 | `uv lock --check` | 通过 | 项目声明与锁文件一致 |
 | `agent-lab eval` | **10 / 10 场景通过** | 临时工作区中的审批、拒绝、恢复、冲突、幂等、预算与三种模式 |
+| `agent-lab kv-benchmark` | **累计块命中率 40.48% → 78.96%** | 2 子代理 + 16 步主循环离线消融：末步命中率达 **88.14%**，未命中 Prefill 减少 **66.82%**，滑动重排从 8 次降至 2 次（详见 [kv-cache-harness.md](kv-cache-harness.md) 与 [kv-cache-ablation-sample.json](kv-cache-ablation-sample.json)） |
 | `agent-lab model-eval --provider reference` | **5 / 5 真实容器基准通过** | 在本机 Docker Desktop（27.4.0）下逐任务检出 Git worktree、运行 21 个受保护 unittest 用例、覆盖跨文件原子修改与 1 次失败后自动修复、验证通过后创建 Git commit（显式标注 `benchmark_harness_verification_only`） |
 | `docker build -t agent-systems-lab .` | 通过 | 构建包含 Git、锁定依赖与非 root 账户 `learner` 的完整应用镜像 |
 | CLI 与队列服务操作 | 通过 | `serve --dispatch queue` + `agent-lab worker` 心跳消费、跨文件 `multi_file` 审批与恢复、trace/calls/result 查询 |

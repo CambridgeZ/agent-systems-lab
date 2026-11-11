@@ -1,0 +1,41 @@
+{
+  "config": {
+    "turns": 16,
+    "max_chars": 6800,
+    "block_chars": 64,
+    "low_watermark_ratio": 0.62
+  },
+  "legacy": {
+    "block_chars": 64,
+    "steps_recorded": 18,
+    "total_chars": 94378,
+    "cached_chars": 38208,
+    "uncached_chars": 56170,
+    "total_blocks": 1466,
+    "hit_blocks": 597,
+    "last_step_hit_rate": 0.3485,
+    "cumulative_hit_rate": 0.4048,
+    "provider_cache_read_input_tokens": 0,
+    "provider_cache_creation_input_tokens": 0,
+    "compaction_events": 8
+  },
+  "optimized": {
+    "block_chars": 64,
+    "steps_recorded": 18,
+    "total_chars": 88590,
+    "cached_chars": 69952,
+    "uncached_chars": 18638,
+    "total_blocks": 1375,
+    "hit_blocks": 1093,
+    "last_step_hit_rate": 0.8814,
+    "cumulative_hit_rate": 0.7896,
+    "provider_cache_read_input_tokens": 0,
+    "provider_cache_creation_input_tokens": 0,
+    "compaction_events": 2
+  },
+  "improvement": {
+    "hit_rate_delta": 0.3848,
+    "uncached_prefill_reduction_pct": 66.82,
+    "estimated_effective_input_cost_saving_pct": 57.27
+  }
+}

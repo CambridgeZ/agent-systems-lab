@@ -35,6 +35,7 @@ flowchart LR
 | Git 工作树 | 多文件修改怎样绑定 `base_commit` 并在测试通过后安全提交？ | [`git_repo.py`](../src/agent_lab/git_repo.py) |
 | 代码地图 | 如何在固定字符预算内定位高中心度文件与跨文件符号定义？ | [`repomap.py`](../src/agent_lab/repomap.py) |
 | 工作记忆 | 压缩旧对话后如何保留带 SHA-256 证据校验且自动判旧的事实？ | [`working_memory.py`](../src/agent_lab/working_memory.py) |
+| KV 缓存优化 | 如何通过瞬态置尾、阶梯水位压缩与共享工具前缀避免级联重算？ | [`kv_cache.py`](../src/agent_lab/kv_cache.py)、[专题文档](kv-cache-harness.md) |
 | 模型适配 | Anthropic / OpenAI 返回值如何变成统一消息与 usage？ | [`providers.py`](../src/agent_lab/providers.py) |
 | 工具层 | 参数、路径、跨文件原子替换、Git 基线和 epoch 怎样校验？ | [`tools.py`](../src/agent_lab/tools.py) |
 | 存储层 | 哪些内容必须跨进程重启保存并校验世代令牌？ | [`storage.py`](../src/agent_lab/storage.py) |

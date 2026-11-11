@@ -26,6 +26,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .runtime import AgentRuntime
 from .execution_lock import RunBusy
 from .git_repo import GitRepoError, create_task_worktree, init_git_repo_from_dir
+from .kv_cache import simulate_kv_cache_ablation, summarize_kv_cache
 from .repomap import RepoMapIndex
 from .sandbox import discover_test_oracles
 from .storage import Storage
@@ -201,6 +202,14 @@ def create_app(state_dir: Path | None = None, provider: str | None = None) -> Fa
     async def workers():
         return {"dispatch_mode": dispatch_mode, "workers": storage.list_workers()}
 
+    @app.get("/api/kv-benchmark")
+    async def kv_benchmark(
+        turns: int = Query(default=16, ge=4, le=40),
+        max_chars: int = Query(default=6800, ge=3200, le=64000),
+        block_chars: int = Query(default=64, ge=16, le=512),
+    ):
+        return simulate_kv_cache_ablation(turns=turns, max_chars=max_chars, block_chars=block_chars)
+
     @app.post("/api/runs", status_code=202)
     async def create_run(body: TaskInput):
         if dispatch_mode == "inline" and sum(not job.done() for job in jobs.values()) >= 4:
@@ -253,6 +262,7 @@ def create_app(state_dir: Path | None = None, provider: str | None = None) -> Fa
         run["proposals"] = storage.proposals(run_id)
         run["context"] = stored["metadata"].get("context_stats", {})
         run["verification"] = stored["metadata"].get("verification", {})
+        run["kv_cache"] = summarize_kv_cache(stored["metadata"].get("kv_cache"))
         run["git"] = stored["metadata"].get("git")
         run["lease"] = storage.get_lease(run_id)
         wm = stored["metadata"].get("working_memory")

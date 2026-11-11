@@ -264,7 +264,11 @@ async function refreshRun() {
         ? "0 tok"
         : (run.input_tokens + run.output_tokens).toLocaleString();
     const epochText = run.lease?.epoch ? "E" + run.lease.epoch + " · " : "";
-    $("lease-tokens").textContent = epochText + run.mode + " · " + tokText;
+    const kvRate = run.kv_cache?.steps_recorded
+      ? "KV " + Math.round((run.kv_cache.cumulative_hit_rate || 0) * 100) + "% · "
+      : "";
+    $("lease-tokens").textContent =
+      epochText + kvRate + run.mode + " · " + tokText;
     $("answer-card").classList.toggle("hidden", !run.answer && !run.error);
     $("answer").textContent = run.answer || "运行停止：" + run.error;
     const leaseActive =

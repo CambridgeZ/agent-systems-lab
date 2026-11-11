@@ -40,10 +40,17 @@ class ContextManager:
     这是序列化字符预算，既不包含服务商隐藏包装，也不保证等于真实 token 上限。
     """
 
-    def __init__(self, max_chars: int = 24_000):
+    def __init__(self, max_chars: int = 24_000, *, low_watermark_ratio: float = 1.0):
         if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 1:
             raise ValueError("max_chars 必须是正整数")
+        if (
+            isinstance(low_watermark_ratio, bool)
+            or not isinstance(low_watermark_ratio, (int, float))
+            or not 0.2 <= float(low_watermark_ratio) <= 1.0
+        ):
+            raise ValueError("low_watermark_ratio 必须在 0.2 到 1.0 之间")
         self.max_chars = max_chars
+        self.low_watermark_ratio = float(low_watermark_ratio)
         self._stats: dict = {}
 
     def _atomic_groups(self, messages: list[dict]) -> list[list[dict]]:
@@ -129,24 +136,39 @@ class ContextManager:
                 raise ValueError("pinned 只接受字符串或 text 块，不能包含工具调用/结果")
 
     def build(
-        self, messages: list[dict], *, pinned: list[dict] | None = None, reserved_chars: int = 0
+        self,
+        messages: list[dict],
+        *,
+        pinned: list[dict] | None = None,
+        tail_state: list[dict] | None = None,
+        reserved_chars: int = 0,
+        min_dropped_groups: int = 0,
     ) -> list[dict]:
         """构造预算内的消息副本；原任务与必需内容装不下时显式失败。
 
         不截断 JSON、源码或最新工具结果。大结果应由运行时先保存，再投影为包含
         取回引用的有界结果；本层只负责保留协议与删除完整旧组，不假装生成语义摘要。
-        组大小预计算一次，裁剪时只减去旧组开销，避免每删一组都重序列化全部历史。
+        为提高 KV Cache 前缀命中率，支持两项机制：
+        1. tail_state 将每步高频变化的 HARNESS_STATE / WORKING_MEMORY 追加在末尾，不污染历史前缀；
+        2. min_dropped_groups + low_watermark_ratio 实现阶梯式水位压缩，避免满预算后每步滑动左移。
         """
         if isinstance(reserved_chars, bool) or not isinstance(reserved_chars, int) or reserved_chars < 0:
             raise ValueError("reserved_chars 必须是非负整数")
+        if isinstance(min_dropped_groups, bool) or not isinstance(min_dropped_groups, int) or min_dropped_groups < 0:
+            raise ValueError("min_dropped_groups 必须是非负整数")
         if not isinstance(messages, list):
             raise ValueError("messages 必须是消息列表")
         if pinned is None:
             pinned = []
         if not isinstance(pinned, list):
             raise ValueError("pinned 必须是消息列表")
+        if tail_state is None:
+            tail_state = []
+        if not isinstance(tail_state, list):
+            raise ValueError("tail_state 必须是消息列表")
         self._validate_pinned(pinned)
-        if not messages and pinned:
+        self._validate_pinned(tail_state)
+        if not messages and (pinned or tail_state):
             raise ValueError("提供 pinned 时仍需要最初的 user 任务消息")
 
         # 只扫描原始引用；验证与裁剪不修改它们。最终仅复制保留部分，避免复制整份长日志。
@@ -159,18 +181,33 @@ class ContextManager:
         effective_budget = self.max_chars - reserved_chars
         pinned_cost = sum(_item_size(message) + 1 for message in pinned)
         pinned_size = _size(pinned) if pinned else 0
+        tail_state_cost = sum(_item_size(message) + 1 for message in tail_state)
+        tail_state_size = _size(tail_state) if tail_state else 0
         tail = groups[1:]
         # 每条消息多计一个分隔逗号；存在首条任务时，它恰好等于追加各组的字符增量。
         group_costs = [sum(_item_size(message) + 1 for message in group) for group in tail]
-        remaining_cost = sum(group_costs)
-        removed = 0
-        dropped_groups = 0
+        start_cursor = min(min_dropped_groups, max(0, len(tail) - 1)) if tail else 0
+        dropped_groups = start_cursor
+        removed = sum(len(group) for group in tail[:dropped_groups])
+        remaining_cost = sum(group_costs[dropped_groups:])
+        overflow_triggered = False
         while True:
             first = self._with_notice(messages[0], removed) if messages else None
-            candidate_size = 2 + _item_size(first) + pinned_cost + remaining_cost if first else 2
+            fixed_overhead = (2 + _item_size(first) + pinned_cost + tail_state_cost) if first else 2
+            candidate_size = fixed_overhead + remaining_cost if first else 2
+            if candidate_size <= effective_budget and overflow_triggered and self.low_watermark_ratio < 1.0:
+                history_capacity = max(0, effective_budget - fixed_overhead)
+                low_target = int(history_capacity * self.low_watermark_ratio)
+                while len(tail) - dropped_groups > 1 and remaining_cost > low_target:
+                    removed += len(tail[dropped_groups])
+                    remaining_cost -= group_costs[dropped_groups]
+                    dropped_groups += 1
+                first = self._with_notice(messages[0], removed) if messages else None
+                fixed_overhead = (2 + _item_size(first) + pinned_cost + tail_state_cost) if first else 2
+                candidate_size = fixed_overhead + remaining_cost if first else 2
             self._stats = {
                 "original_messages": len(messages),
-                "kept_messages": len(messages) - removed + len(pinned),
+                "kept_messages": len(messages) - removed + len(pinned) + len(tail_state),
                 "kept_history_messages": len(messages) - removed,
                 "dropped_messages": removed,
                 "dropped_groups": dropped_groups,
@@ -178,6 +215,11 @@ class ContextManager:
                 "kept_chars": candidate_size,
                 "pinned_messages": len(pinned),
                 "pinned_chars": pinned_size,
+                "tail_state_messages": len(tail_state),
+                "tail_state_chars": tail_state_size,
+                "compaction_cursor": dropped_groups,
+                "compaction_triggered": dropped_groups > start_cursor,
+                "low_watermark_ratio": self.low_watermark_ratio,
                 "reserved_chars": reserved_chars,
                 "effective_message_budget": effective_budget,
                 "request_chars": candidate_size + reserved_chars,
@@ -186,13 +228,16 @@ class ContextManager:
                 "overflow": candidate_size > effective_budget,
             }
             if candidate_size <= effective_budget:
-                candidate = ([first] + pinned if first else []) + [
-                    message for group in tail[dropped_groups:] for message in group
-                ]
+                candidate = (
+                    ([first] + pinned if first else [])
+                    + [message for group in tail[dropped_groups:] for message in group]
+                    + tail_state
+                )
                 return deepcopy(candidate)
             # 最新一组不能删除；只剩下原任务、固定工作状态时也不能继续缩小。
             if len(tail) - dropped_groups <= 1:
                 raise ContextOverflow("原任务、固定工作状态与最新完整消息组超过上下文字符预算")
+            overflow_triggered = True
             removed += len(tail[dropped_groups])
             remaining_cost -= group_costs[dropped_groups]
             dropped_groups += 1

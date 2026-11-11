@@ -223,3 +223,29 @@ def has_working_memory_content(memory: dict[str, Any] | None) -> bool:
         or memory.get("todos")
         or memory.get("facts")
     )
+
+
+def prompt_view_working_memory(audited: dict[str, Any]) -> dict[str, Any]:
+    """生成供模型推理使用的确定性工作记忆视图：剥离 recorded_at 等墙钟时间戳噪声。"""
+    def _clean_fact(item: dict[str, Any]) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {
+            "id": item.get("id", ""),
+            "claim": item.get("claim", ""),
+            "source_type": item.get("source_type", ""),
+            "source_ref": item.get("source_ref", ""),
+            "source_sha256": item.get("source_sha256", ""),
+            "status": item.get("status", "valid"),
+        }
+        if item.get("stale_reason"):
+            cleaned["stale_reason"] = item["stale_reason"]
+        return cleaned
+
+    return {
+        "goal": audited.get("goal", ""),
+        "constraints": list(audited.get("constraints", [])),
+        "todos": list(audited.get("todos", [])),
+        "valid_facts": [_clean_fact(f) for f in audited.get("valid_facts", [])],
+        "stale_facts": [_clean_fact(f) for f in audited.get("stale_facts", [])],
+        "total_facts": int(audited.get("total_facts", 0)),
+        "stale_count": int(audited.get("stale_count", 0)),
+    }

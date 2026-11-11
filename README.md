@@ -40,6 +40,9 @@ uv run agent-lab eval --report reports/eval.json
 
 # 5 任务编码基准流水线验证（需本地已有 python:3.12-slim 镜像；reference 仅验证评测流水线）
 uv run agent-lab model-eval --provider reference --report reports/model-eval.json
+
+# Harness 级 KV Cache 命中率与阶梯压缩离线消融实验（对比 Legacy 40.48% vs Optimized 78.96%）
+uv run agent-lab kv-benchmark --report docs/kv-cache-ablation-sample.json
 ```
 
 `demo` 与 `model-eval --provider reference` 都是显式标注的确定性基线，用来检验 harness 控制流、Git worktree、容器回执与修复循环，**不代表任何 LLM 的真实编码能力**。真实模式支持官方 Anthropic Messages API（`--provider anthropic`）与 OpenAI 兼容 Chat Completions API（`--provider openai`），需配置账户密钥后独立实测模型得分。
@@ -56,6 +59,7 @@ uv run agent-lab model-eval --provider reference --report reports/model-eval.jso
 | 工具接口与策略 | JSON Schema、字面量检索、路径约束、结构化错误、工具审计 | [tools.py](src/agent_lab/tools.py) |
 | RAG | 带标题/小节背景分块、BM25、TF-IDF 词法向量、RRF 排名融合、可版本化引用 | [retrieval.py](src/agent_lab/retrieval.py) |
 | 上下文工程 | system/tools/messages 总字符预算；固定执行状态；原子裁剪；大结果引用与分页回取 | [context.py](src/agent_lab/context.py)、[专题说明](docs/context-skills-state.md) |
+| Harness 级 KV Cache 优化 | 瞬态状态置尾、确定性紧凑 JSON、62% 高低水位阶梯压缩、多子代理根前缀共享、Anthropic 三断点 `cache_control` + OpenAI `prompt_cache_key`、链式块哈希观测 | [kv_cache.py](src/agent_lab/kv_cache.py)、[原理与消融文档](docs/kv-cache-harness.md) |
 | 带来源的结构化工作记忆 | `<= 2400` 字符的 `goal/constraints/todos/facts` 跨裁剪保留；事实强制核验文件或 `tool_calls` SHA-256，文件变更后自动标为 `stale` | [working_memory.py](src/agent_lab/working_memory.py)、[context.py](src/agent_lab/context.py) |
 | Skills | 有界元数据发现、章节索引、按章节加载/卸载、版本快照、去重与缓存失效 | [skills.py](src/agent_lab/skills.py)、[code-review](skills/code-review/SKILL.md) |
 | 跨会话记忆 | 用户显式保存笔记，模型可读取；scope 与执行日志分离 | [storage.py](src/agent_lab/storage.py)、[api.py](src/agent_lab/api.py) |
@@ -96,8 +100,9 @@ flowchart LR
 4. [20 篇 Anthropic 文章对应地图](docs/anthropic-reading-map.md)：每篇对应机制、代码和未实现部分。
 5. [44 道基础面试问题](docs/interview-guide.md) + [36 道进阶补充](docs/interview-supplement.md)：加上[沙盒专题 8 题（81—88）](docs/sandbox-mechanisms.md)，共 88 题，覆盖协议、上下文、Skill、恢复、代码检索、评测、成本与隔离机制。
 6. [长上下文、Skill 与工具状态专项说明](docs/context-skills-state.md)：压缩规则、崩溃窗口、可复制实验和高可用边界。
-7. [沙盒机制与隔离探针](docs/sandbox-mechanisms.md)：文件/网络/资源边界、镜像与快照、超时与日志限制、可信度局限。
-8. [验证记录](docs/validation.md)：交付时实际运行了什么，哪些需要额外环境。
+7. [Harness 级 KV Cache 命中率优化原理](docs/kv-cache-harness.md)：为什么代码 Agent 必须做前缀对齐、RoPE 与链式块哈希失效原理、6 项落地机制与消融数据。
+8. [沙盒机制与隔离探针](docs/sandbox-mechanisms.md)：文件/网络/资源边界、镜像与快照、超时与日志限制、可信度局限。
+9. [验证记录](docs/validation.md)：交付时实际运行了什么，哪些需要额外环境。
 
 阅读代码建议从 `AgentRuntime.start → execute → Provider.complete → ToolRegistry.execute` 开始，接着看审批与恢复测试。避免只背术语；能解释失败场景更有说服力。
 
@@ -155,7 +160,7 @@ docker run --rm -p 127.0.0.1:8765:8765 agent-systems-lab
 
 ## 实现范围
 
-这是面向学习与作品集的**单机多进程可验证工程**。全部约束均有自动化测试（273 项单元测试、10 项控制流回归、5 项真实 Git worktree + Docker 编码基准流水线），并在本机 Docker Desktop 与 GitHub Actions Linux 容器中双重验证。当前仍需如实区分的工程边界：
+这是面向学习与作品集的**单机多进程可验证工程**。全部约束均有自动化测试（281 项单元测试、10 项控制流回归、5 项真实 Git worktree + Docker 编码基准流水线与 KV Cache 消融实验），并在本机 Docker Desktop 与 GitHub Actions Linux 容器中双重验证。当前仍需如实区分的工程边界：
 
 - **评测诚实性**：仓库内置 `demo` 与 `reference` 结果仅证明 harness 与沙盒闭环无误；未在无外部 API 密钥的 CI 中冒充真实 Claude / OpenAI 编码得分。
 - **单机 SQLite 队列 vs 跨主机分布式集群**：`run_leases`、心跳续期、过期接管与单调递增 `epoch` fencing 已在单机多进程（API + 独立 `agent-lab worker`）下完整闭环并拦截僵尸写入；跨主机多副本部署仍需替换为 Postgres/etcd 共享事务存储、对象/Git 远端仓库与独立沙盒执行池。

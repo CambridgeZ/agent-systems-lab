@@ -12,6 +12,8 @@ import os
 import uuid
 from typing import Any, Protocol
 
+from .kv_cache import build_anthropic_cached_payload, canonical_json, canonical_tools
+
 
 class Provider(Protocol):
     async def complete(
@@ -303,6 +305,8 @@ class DemoProvider:
 class AnthropicProvider:
     """SDK 做有限网络重试和请求超时；凭证不进入 prompt / SQLite / 事件。"""
 
+    supports_cache_hints = True
+
     def __init__(self) -> None:
         from anthropic import AsyncAnthropic
 
@@ -328,26 +332,44 @@ class AnthropicProvider:
         await self.client.close()
 
     async def complete(
-        self, system: str, messages: list[dict], tools: list[dict], max_tokens: int = 2048
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        max_tokens: int = 2048,
+        *,
+        cache_key: str | None = None,
+        tail_state_count: int = 0,
     ) -> dict:
-        response = await self.client.messages.create(
-            model=self.model, system=system, messages=messages, tools=tools, max_tokens=max_tokens
+        del cache_key  # Anthropic 通过显式 cache_control 断点命中前缀缓存
+        cached_req = build_anthropic_cached_payload(
+            system, messages, tools, max_tokens=max_tokens, tail_state_count=tail_state_count
         )
+        response = await self.client.messages.create(model=self.model, **cached_req)
         content = [block.model_dump(exclude_none=True) for block in response.content]
         if any(block["type"] not in {"text", "tool_use"} for block in content):
             raise ValueError("模型返回当前适配器不支持的内容块")
+        usage: dict[str, int] = {
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        }
+        cache_read = getattr(response.usage, "cache_read_input_tokens", None)
+        cache_write = getattr(response.usage, "cache_creation_input_tokens", None)
+        if cache_read is not None:
+            usage["cache_read_input_tokens"] = int(cache_read)
+        if cache_write is not None:
+            usage["cache_creation_input_tokens"] = int(cache_write)
         return {
             "content": content,
             "stop_reason": response.stop_reason,
-            "usage": {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-            },
+            "usage": usage,
         }
 
 
 class OpenAICompatibleProvider:
     """兼容 OpenAI Chat Completions 工具调用协议的真实模型适配器。"""
+
+    supports_cache_hints = True
 
     def __init__(self) -> None:
         import httpx
@@ -388,7 +410,7 @@ class OpenAICompatibleProvider:
                         "type": "function",
                         "function": {
                             "name": b["name"],
-                            "arguments": json.dumps(b["input"], ensure_ascii=False),
+                            "arguments": canonical_json(b["input"]),
                         },
                     }
                     for b in content
@@ -413,8 +435,17 @@ class OpenAICompatibleProvider:
         return out
 
     async def complete(
-        self, system: str, messages: list[dict], tools: list[dict], max_tokens: int = 2048
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        max_tokens: int = 2048,
+        *,
+        cache_key: str | None = None,
+        tail_state_count: int = 0,
     ) -> dict:
+        del tail_state_count  # OpenAI / vLLM 基于前缀块自动匹配，尾部瞬态布局已由 ContextManager 保证
+        norm_tools = canonical_tools(tools)
         openai_tools = [
             {
                 "type": "function",
@@ -424,7 +455,7 @@ class OpenAICompatibleProvider:
                     "parameters": spec.get("input_schema", {"type": "object", "properties": {}}),
                 },
             }
-            for spec in tools
+            for spec in norm_tools
         ]
         payload: dict[str, Any] = {
             "model": self.model,
@@ -433,6 +464,8 @@ class OpenAICompatibleProvider:
         }
         if openai_tools:
             payload["tools"] = openai_tools
+        if cache_key:
+            payload["prompt_cache_key"] = cache_key
         resp = await self.client.post("/chat/completions", json=payload)
         resp.raise_for_status()
         data = resp.json()
@@ -456,13 +489,17 @@ class OpenAICompatibleProvider:
         if choice.get("finish_reason") == "length" and stop_reason == "end_turn":
             stop_reason = "max_tokens"
         usage = data.get("usage") or {}
+        parsed_usage: dict[str, int] = {
+            "input_tokens": int(usage.get("prompt_tokens", 0)),
+            "output_tokens": int(usage.get("completion_tokens", 0)),
+        }
+        details = usage.get("prompt_tokens_details") or {}
+        if isinstance(details, dict) and details.get("cached_tokens") is not None:
+            parsed_usage["cache_read_input_tokens"] = int(details["cached_tokens"])
         return {
             "content": content,
             "stop_reason": stop_reason,
-            "usage": {
-                "input_tokens": int(usage.get("prompt_tokens", 0)),
-                "output_tokens": int(usage.get("completion_tokens", 0)),
-            },
+            "usage": parsed_usage,
         }
 
 

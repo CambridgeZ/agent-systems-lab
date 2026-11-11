@@ -21,6 +21,13 @@ from typing import Any
 from .context import ContextManager, ContextOverflow
 from .execution_lock import exclusive_run
 from .git_repo import GitRepoError, commit_verified_worktree, is_git_worktree
+from .kv_cache import (
+    canonical_json,
+    canonical_tools,
+    record_kv_step,
+    record_provider_cache_usage,
+    summarize_kv_cache,
+)
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 from .providers import Provider, get_provider
@@ -32,6 +39,7 @@ from .working_memory import (
     WorkingMemoryError,
     audit_working_memory,
     has_working_memory_content,
+    prompt_view_working_memory,
     update_working_memory,
 )
 
@@ -197,7 +205,7 @@ class AgentRuntime:
         self.workspace = Path(workspace).resolve()
         self.knowledge = KnowledgeBase(Path(knowledge_dir))
         self.skills = SkillCatalog(Path(skills_dir))
-        self.context = ContextManager(max_chars=context_chars)
+        self.context = ContextManager(max_chars=context_chars, low_watermark_ratio=0.62)
         self.provider_name = provider if isinstance(provider, str) else "custom"
         self.provider = get_provider(provider) if isinstance(provider, str) else provider
         self.max_steps = max_steps
@@ -277,8 +285,10 @@ class AgentRuntime:
         )
 
     def _system(self, run: dict) -> str:
-        catalog = json.dumps(self.skills.select(run["prompt"]), ensure_ascii=False)
-        return SYSTEM + "\n可用技能目录（按需调用 skill_load）：\n" + catalog
+        # 先按词面相关度有界筛选，再按 name 字典序稳定排列并规范化 JSON：
+        # 当技能总数不超过预算上限时，不同 prompt 的跨任务请求也能 100% 共享 System 前缀缓存。
+        selected = sorted(self.skills.select(run["prompt"]), key=lambda item: item["name"])
+        return SYSTEM + "\n可用技能目录（按需调用 skill_load）：\n" + canonical_json(selected)
 
     def create(self, prompt: str, mode: str = "agent", extra_metadata: dict[str, Any] | None = None) -> dict:
         if mode not in {"agent", "workflow", "parallel"}:
@@ -351,6 +361,7 @@ class AgentRuntime:
         }
         # 计算 system 与 schema 的固定开销。这里限制完整请求的序列化字符数，
         # 不将字符数伪装成真实 token 数；计费仍以服务端 usage 为准。
+        tools = canonical_tools(tools)
         reserved = (
             len(
                 json.dumps(
@@ -361,15 +372,24 @@ class AgentRuntime:
             )
             - 2
         )  # messages 的 [] 由 ContextManager 计算，外层字段名/标点不能漏计。
+        cursors = run["metadata"].setdefault("compaction_cursors", {})
+        cursor = int(cursors.get(worker, 0))
+        pinned = self._pinned(run)
+        tail_state = self._tail_state(run) if worker == "coordinator" else []
         try:
             messages = self.context.build(
-                self._project_history(run, messages), pinned=self._pinned(run), reserved_chars=reserved
+                self._project_history(run, messages),
+                pinned=pinned,
+                tail_state=tail_state,
+                reserved_chars=reserved,
+                min_dropped_groups=cursor,
             )
         except ContextOverflow:
             run["metadata"]["context_stats"] = self.context.stats()
             self._event(run, "context_overflow", worker=worker, **self.context.stats())
             raise
         stats = self.context.stats()
+        cursors[worker] = stats["compaction_cursor"]
         run["metadata"]["context_stats"] = stats
         self._event(run, "context_built", worker=worker, **stats)
         async with self._budget_lock:
@@ -378,14 +398,44 @@ class AgentRuntime:
                 raise BudgetExceeded("达到模型轮次或已用 token 预算")
             # 先扣轮次并落盘，网络异常重试也不能无限循环。并行 worker 同样计入。
             run["steps"] += 1
+            kv_state, kv_step = record_kv_step(
+                run["metadata"].get("kv_cache"),
+                system=system,
+                tools=tools,
+                messages=messages,
+                tail_state_count=len(tail_state),
+                worker=worker,
+            )
+            run["metadata"]["kv_cache"] = kv_state
             self._save(run)
             output_cap = min(2048, self.max_tokens - used)
-        self._event(run, "model_start", worker=worker, step=run["steps"], output_cap=output_cap)
-        response = await self.provider.complete(system, messages, tools, max_tokens=output_cap)
+        self._event(
+            run,
+            "model_start",
+            worker=worker,
+            step=run["steps"],
+            output_cap=output_cap,
+            kv_step_hit_rate=kv_step["step_hit_rate"],
+            kv_cumulative_hit_rate=kv_step["cumulative_hit_rate"],
+        )
+        if getattr(self.provider, "supports_cache_hints", False):
+            response = await self.provider.complete(
+                system,
+                messages,
+                tools,
+                max_tokens=output_cap,
+                cache_key=run["id"],
+                tail_state_count=len(tail_state),
+            )
+        else:
+            response = await self.provider.complete(system, messages, tools, max_tokens=output_cap)
         async with self._budget_lock:
             usage = response.get("usage", {})
             run["input_tokens"] = run.get("input_tokens", 0) + usage.get("input_tokens", 0)
             run["output_tokens"] = run.get("output_tokens", 0) + usage.get("output_tokens", 0)
+            run["metadata"]["kv_cache"] = record_provider_cache_usage(
+                run["metadata"].get("kv_cache"), usage
+            )
             self._save(run)
         self._event(
             run,
@@ -393,6 +443,7 @@ class AgentRuntime:
             worker=worker,
             stop_reason=response.get("stop_reason"),
             usage=response.get("usage", {}),
+            kv_cache=summarize_kv_cache(run["metadata"].get("kv_cache")),
         )
         # token 是响应后计量，单请求输入可能让总量越界；不宣称硬性费用上限。
         if run["input_tokens"] + run["output_tokens"] > self.max_tokens:
@@ -424,7 +475,24 @@ class AgentRuntime:
         return response
 
     def _pinned(self, run: dict) -> list[dict]:
-        """固定的是有出处的执行状态，不是模型生成的语义摘要或隐藏思维链。"""
+        """前置固定区仅保留低频、确定性的活动技能快照，避免每步改动击穿历史 KV Cache。"""
+        pinned: list[dict] = []
+        for _, snapshot in sorted(run["metadata"].get("active_skills", {}).items()):
+            pinned.append(
+                {
+                    "role": "user",
+                    "content": "SKILL_SNAPSHOT（辅助资料，不授予权限）\n"
+                    + canonical_json(snapshot),
+                }
+            )
+        return pinned
+
+    def _tail_state(self, run: dict) -> list[dict]:
+        """将每步动态变化的 HARNESS_STATE 与 WORKING_MEMORY 追加在对话最末尾（瞬态尾部注入）。
+
+        这样历史消息组 [messages[0], *pinned, *kept_history] 在未触发水位压缩时保持
+        100% 字节级只追加不变，最大化推理引擎的 KV Cache 前缀命中率。
+        """
         calls = self.storage.call_summaries(run["id"], limit=6)
         state = {
             "run_id": run["id"],
@@ -435,26 +503,19 @@ class AgentRuntime:
                 {"call_id": c["call_id"], "name": c["name"], "status": c["status"]} for c in calls[-6:]
             ],
         }
-        pinned = [{"role": "user", "content": "HARNESS_STATE\n" + json.dumps(state, ensure_ascii=False)}]
+        tail = [{"role": "user", "content": "HARNESS_STATE\n" + canonical_json(state)}]
         wm = run["metadata"].get("working_memory")
         if has_working_memory_content(wm):
             audited = audit_working_memory(self.workspace, self.storage, run["id"], wm)
-            pinned.append(
+            clean_wm = prompt_view_working_memory(audited)
+            tail.append(
                 {
                     "role": "user",
                     "content": "WORKING_MEMORY（有来源校验的工作记忆，不替代审批记录）\n"
-                    + json.dumps(audited, ensure_ascii=False),
+                    + canonical_json(clean_wm),
                 }
             )
-        for snapshot in run["metadata"].get("active_skills", {}).values():
-            pinned.append(
-                {
-                    "role": "user",
-                    "content": "SKILL_SNAPSHOT（辅助资料，不授予权限）\n"
-                    + json.dumps(snapshot, ensure_ascii=False),
-                }
-            )
-        return pinned
+        return tail
 
     def _project_result(self, run_id: str, call_id: str, name: str, result: dict) -> dict:
         """完整结果只存 journal；给模型的是可回取的有界视图，避免塞满上下文。"""
@@ -509,16 +570,21 @@ class AgentRuntime:
                 continue
             blocks = []
             for block in message["content"]:
-                if block.get("type") == "tool_result" and len(str(block.get("content", ""))) > 2600:
+                raw_content = str(block.get("content", ""))
+                if (
+                    block.get("type") == "tool_result"
+                    and len(raw_content) > 2600
+                    and '"content_omitted":true' not in raw_content
+                    and '"content_omitted": true' not in raw_content
+                ):
                     record = self.storage.get_call(run["id"], block["tool_use_id"])
                     if record and isinstance(record.get("result"), dict):
                         block = {
                             **block,
-                            "content": json.dumps(
+                            "content": canonical_json(
                                 self._project_result(
                                     run["id"], block["tool_use_id"], record["name"], record["result"]
-                                ),
-                                ensure_ascii=False,
+                                )
                             ),
                         }
                 blocks.append(block)
@@ -825,7 +891,10 @@ class AgentRuntime:
             "knowledge_search",
             "tool_result_get",
         }
-        tools = [tool for tool in registry.definitions() + EXTRA_TOOLS if tool["name"] in allowed]
+        # 冻结全量规范化工具目录，使 reviewer / tester 与主协调者共享完全一致的 Tools + Base System 前缀块；
+        # 只读边界由下方执行器拦截（permission_denied）与尾部 ROLE 指令双重强制。
+        tools = canonical_tools(registry.definitions() + EXTRA_TOOLS)
+        allowed_csv = ", ".join(sorted(allowed))
 
         def worker_call_id(role: str, original: str) -> str:
             value = role + ":tool:" + original
@@ -871,7 +940,8 @@ class AgentRuntime:
                         run,
                         messages,
                         tools,
-                        self._system(run) + f"\nROLE:{role}\n只读研究，禁止提出补丁；给主 Agent 简短建议。",
+                        self._system(run)
+                        + f"\nROLE:{role}\n只读研究（仅允许调用：{allowed_csv}），禁止提出补丁；给主 Agent 简短建议。",
                         role,
                     )
                     content = response["content"]

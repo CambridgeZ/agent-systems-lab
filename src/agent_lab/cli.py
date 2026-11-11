@@ -12,6 +12,7 @@ from pathlib import Path
 from .api import ROOT
 from .git_repo import create_task_worktree, init_git_repo_from_dir
 from .lease import LeaseWorker, build_worker_runtime_factory
+from .kv_cache import simulate_kv_cache_ablation
 from .runtime import AgentRuntime
 from .sandbox import discover_test_oracles
 from .storage import Storage
@@ -84,6 +85,11 @@ def main():
     model_eval.add_argument("--task", action="append", default=None, help="仅运行指定 task_id，可重复传入")
     model_eval.add_argument("--max-repair-rounds", type=int, default=2)
     model_eval.add_argument("--skip-baseline-check", action="store_true")
+    kv_bench = sub.add_parser("kv-benchmark", help="运行 KV Cache 前缀命中率与阶梯压缩离线消融实验")
+    kv_bench.add_argument("--turns", type=int, default=16)
+    kv_bench.add_argument("--max-chars", type=int, default=6800)
+    kv_bench.add_argument("--block-chars", type=int, default=64)
+    kv_bench.add_argument("--report", type=Path, default=None)
     args = parser.parse_args()
     args.state = args.state.resolve()
     args.state.mkdir(parents=True, exist_ok=True)
@@ -96,6 +102,17 @@ def main():
         import uvicorn
 
         uvicorn.run("agent_lab.api:create_app", factory=True, host=args.host, port=args.port)
+        return
+    if args.command == "kv-benchmark":
+        report = simulate_kv_cache_ablation(
+            turns=args.turns, max_chars=args.max_chars, block_chars=args.block_chars
+        )
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        show(report)
+        if report["optimized"]["cumulative_hit_rate"] <= report["legacy"]["cumulative_hit_rate"]:
+            raise SystemExit(1)
         return
     if args.command == "eval":
         from .evals import run_evals

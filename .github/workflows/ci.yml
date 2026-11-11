@@ -18,11 +18,14 @@ jobs:
       - run: uv run --no-sync ruff check src tests scripts
       - run: uv run --no-sync pytest -q
       - run: uv run --no-sync agent-lab eval --report reports/eval.json
+      - run: uv run --no-sync agent-lab kv-benchmark --report reports/kv-benchmark.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: eval-${{ matrix.python-version }}
-          path: reports/eval.json
+          path: |
+            reports/eval.json
+            reports/kv-benchmark.json
 
   sandbox-smoke:
     runs-on: ubuntu-latest
