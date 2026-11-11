@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "started_at": "2026-11-11T07:52:31.670999+00:00",
+  "environment": {
+    "python": "3.12.16",
+    "implementation": "CPython",
+    "os": "Linux",
+    "release": "7.0.0-1019-azure",
+    "machine": "x86_64"
+  },
+  "status": "passed",
+  "cases": [
+    {
+      "case": "baseline_bug",
+      "expected_code": "tests_failed",
+      "code": "tests_failed",
+      "ok": false,
+      "tests_executed": true,
+      "image_id": "sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b",
+      "snapshot_sha256": "c3b9f1cf0efdac17937129ac557f986684bcc26d26052cf5f108c3e3e7843337",
+      "policy_sha256": "30519106172f1e41787c9b2aa9fbbb007e6ee7cfb90c718d926f7b959c3585ea",
+      "cleanup_verified": true,
+      "cleanup_error_present": false,
+      "captured_output_bytes": 1486,
+      "output_sha256": "01ea4de0d31ee5efc7bc67fea5583c85b59f6553afc0df4e4c0c5e1406b7152f"
+    },
+    {
+      "case": "approved_fix",
+      "expected_code": "passed",
+      "code": "passed",
+      "ok": true,
+      "tests_executed": true,
+      "image_id": "sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b",
+      "snapshot_sha256": "8fa064f92e775bd8f3442da7d3dbe4a914db87a32a35315657ca7656ecf22a9b",
+      "policy_sha256": "30519106172f1e41787c9b2aa9fbbb007e6ee7cfb90c718d926f7b959c3585ea",
+      "cleanup_verified": true,
+      "cleanup_error_present": false,
+      "captured_output_bytes": 552,
+      "output_sha256": "a540df1b88d4769eed2f38c1844fb8e194e6aa6b2654070106ea4edb5d20c0ea"
+    },
+    {
+      "case": "isolation",
+      "expected_code": "passed",
+      "code": "passed",
+      "ok": true,
+      "tests_executed": true,
+      "image_id": "sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b",
+      "snapshot_sha256": "6041dbee2c21554c5d1bb7b0ea06441857625e2cc1615086242474456c88f749",
+      "policy_sha256": "30519106172f1e41787c9b2aa9fbbb007e6ee7cfb90c718d926f7b959c3585ea",
+      "cleanup_verified": true,
+      "cleanup_error_present": false,
+      "captured_output_bytes": 581,
+      "output_sha256": "fca42f859c10f7a0e0373a5ba0ee4294d11d254907a2aa479ad42982cae54d60"
+    },
+    {
+      "case": "timeout-repo",
+      "expected_code": "sandbox_timeout",
+      "code": "sandbox_timeout",
+      "ok": false,
+      "tests_executed": null,
+      "image_id": "sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b",
+      "snapshot_sha256": "a3b0cca829108f3bc1780ff3b37e3f3e1fb90d840f0e380c920ce057d374b1a6",
+      "policy_sha256": "919396903d5457088e91fdd90679f3ad760056653f5df7290101db58515e61f3",
+      "cleanup_verified": true,
+      "cleanup_error_present": false,
+      "captured_output_bytes": 24,
+      "output_sha256": "8cc115d6200dded34c6051029128d426229380e3f817fc562b569f1f10455bdf"
+    },
+    {
+      "case": "output-repo",
+      "expected_code": "sandbox_output_limit",
+      "code": "sandbox_output_limit",
+      "ok": false,
+      "tests_executed": null,
+      "image_id": "sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b",
+      "snapshot_sha256": "2c4cdce833d53d74df26460ba1ec6e7e921b3375e92b587f31ee770aa6ea6628",
+      "policy_sha256": "5e40be4040393964cf1756fea3706e8db96fd7ea5cec5dbc39025b40e7b60d85",
+      "cleanup_verified": true,
+      "cleanup_error_present": false,
+      "captured_output_bytes": 2048,
+      "output_sha256": "f6d00d2673beed53d1a63969db370c40d262ac2c6c0caf6b89fb5cb8746b4dca"
+    },
+    {
+      "case": "early_exit",
+      "expected_code": "sandbox_incomplete",
+      "code": "sandbox_incomplete",
+      "ok": false,
+      "tests_executed": null,
+      "image_id": "sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b",
+      "snapshot_sha256": "6bae58658842307dbea2b6ead4d28f39ab66d4b8c1d3da3662340748ecd6e1d6",
+      "policy_sha256": "30519106172f1e41787c9b2aa9fbbb007e6ee7cfb90c718d926f7b959c3585ea",
+      "cleanup_verified": true,
+      "cleanup_error_present": false,
+      "captured_output_bytes": 0,
+      "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "finished_at": "2026-11-11T07:52:42.803236+00:00"
+}

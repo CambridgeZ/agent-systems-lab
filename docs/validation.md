@@ -54,4 +54,15 @@
 - **沙盒单测**：37项无需Docker的策略与故障测试，包括只读快照、敏感路径排除、链接/FIFO拒绝、镜像ID固定、输出读取硬上限、超时/清理与测试回执。它们不证明内核隔离生效。
 - **学习资料**：共88道连续编号问题；两个压缩/分页实验实际运行通过；源码链接检查通过。
 
-增强后的真实容器检查由 `scripts/sandbox_smoke.py` 执行：业务bug/审批修复、只读与禁网探针、权限/seccomp、凭证不暴露、超时、超量输出、提前退出和清理。对应脱敏报告由CI上传为 `sandbox-smoke` artifact；本机仍为 `sandbox_unavailable`。本轮CI的具体运行链接将在完成后记录。
+增强后的真实容器检查由 `scripts/sandbox_smoke.py` 执行：业务bug/审批修复、只读与禁网探针、权限/seccomp、凭证不暴露、超时、超量输出、提前退出和清理。对应脱敏报告由CI上传为 `sandbox-smoke` artifact；本机仍为 `sandbox_unavailable`。本轮CI已全部通过，具体证据见下方。
+
+## 本轮增强的远端验证结果
+
+[GitHub Actions 运行42982653696](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42982653696) 对应代码提交 `8f20646`，全部成功：
+
+- Ubuntu / Python 3.11 与3.12：各255项测试、Ruff检查和10个隔离离线场景通过。
+- 真实Docker：原始bug被捕获，审批后的修复通过四项受保护测试。
+- 真实隔离探针：非root、根/工作区只读并拒绝写入、仅loopback且外连失败、无宿主环境/哨兵文件/Docker socket、capabilities为零、NoNewPrivs与seccomp生效。
+- 5秒执行超时、2KiB输出限额、`os._exit(0)`提前退出分别产生预期状态；六个case均确认清理完成。
+
+脱敏原始报告见 [sandbox-validation-sample.json](sandbox-validation-sample.json)，也可下载该run的 `sandbox-smoke` artifact。报告以每次执行的镜像ID、源码快照和policy哈希标明输入；不保存原始容器日志或宿主哨兵值。本次真实探针不构成对未知内核漏洞、恶意同进程测试伪造或所有资源压力情形的安全保证。
