@@ -35,8 +35,11 @@ jobs:
       - run: uv sync --locked --extra dev
       - run: docker pull python:3.12-slim
       - run: uv run --no-sync python scripts/sandbox_smoke.py
+      - run: uv run --no-sync agent-lab model-eval --provider reference --report reports/model-eval.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: sandbox-smoke
-          path: reports/sandbox-smoke.json
+          path: |
+            reports/sandbox-smoke.json
+            reports/model-eval.json

@@ -36,8 +36,8 @@
             阅读代码 → 检索知识 → 提出补丁 → 人工审批 → 验证结果。<br />在同一条执行轨迹里，观察模型、工具和执行框架如何配合。
           </p>
           <div class="capabilities">
-            <span>Tool use</span><span>RAG</span><span>Checkpoint</span
-            ><span>MCP</span><span>Evals</span>
+            <span>Git Worktree</span><span>Multi-File CAS</span><span>Repair Loop</span
+            ><span>Lease + Epoch</span><span>AST RepoMap</span><span>Provenance Memory</span>
           </div>
         </section>
         <div class="layout">
@@ -45,20 +45,30 @@
             <section class="card composer">
               <div class="card-heading">
                 <span><b class="tiny-icon">↗</b> 新建开发任务</span
-                ><span class="small muted">独立示例仓库</span>
+                ><span class="small muted" id="template-badge">独立示例副本 / Git Worktree</span>
               </div>
               <label class="sr-only" for="prompt">任务描述</label
               ><textarea id="prompt" rows="3">
 修复 pricing.py 的百分比折扣 bug，并验证修改。</textarea
               >
               <div class="composer-footer">
-                <label
-                  >执行模式
-                  <select id="mode">
-                    <option value="agent">Agent · 模型选择工具</option>
-                    <option value="workflow">Workflow · 固定检索前置</option>
-                    <option value="parallel">Parallel · 双 Worker 研究</option>
-                  </select></label
+                <div class="composer-selects">
+                  <label
+                    >仓库模板
+                    <select id="template">
+                      <option value="sample">单文件 · pricing.py</option>
+                      <option value="multi_file">多文件 Git Worktree · 结算封顶</option>
+                    </select></label
+                  >
+                  <label
+                    >执行模式
+                    <select id="mode">
+                      <option value="agent">Agent · 模型选择工具</option>
+                      <option value="workflow">Workflow · 固定检索前置</option>
+                      <option value="parallel">Parallel · 双 Worker 研究</option>
+                    </select></label
+                  >
+                </div
                 ><button class="button primary-button" id="start">
                   开始运行 <span>↗</span>
                 </button>
@@ -72,13 +82,16 @@
                 <span><b class="tiny-icon">◎</b> 执行轨迹</span
                 ><span id="status" class="status idle">等待任务</span>
               </div>
-              <div class="metrics">
+              <div class="metrics metrics-4">
                 <div><label>模型轮次</label><strong id="steps">—</strong></div>
                 <div>
-                  <label>已计量 TOKENS</label><strong id="tokens">—</strong>
+                  <label>验证结论 (TESTS)</label><strong id="verification-label">—</strong>
                 </div>
                 <div>
-                  <label>执行模式</label><strong id="mode-label">—</strong>
+                  <label>GIT 基线 / 提交</label><strong id="git-label">—</strong>
+                </div>
+                <div>
+                  <label>租约 EPOCH / TOKENS</label><strong id="lease-tokens">—</strong>
                 </div>
               </div>
               <div id="empty" class="empty">
@@ -107,6 +120,16 @@
             </section>
           </div>
           <aside class="right-rail">
+            <section class="card mini">
+              <div class="eyebrow">队列与工作状态</div>
+              <h3>工程可观测面板</h3>
+              <div id="worker-stat" class="knowledge-stat">调度模式检测中…</div>
+              <div id="wm-box" class="state-box muted">选择任务后显示带来源哈希校验的工作记忆。</div>
+              <details id="repomap-details" class="repomap-details hidden">
+                <summary>查看 AST 代码地图 (RepoMap)</summary>
+                <pre id="repomap-pre"></pre>
+              </details>
+            </section>
             <section class="card mini">
               <div class="eyebrow">系统构成</div>
               <h3>一条完整的工程链路</h3>

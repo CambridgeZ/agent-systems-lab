@@ -6,17 +6,19 @@
 
 | 验证 | 结果 | 覆盖内容 |
 |---|---|---|
-| `pytest -q` | **255 passed** | 检索、完整请求预算与协议、Skill快照/缓存、调用账本、故障恢复、同机互斥/取消、沙盒策略/流式限额、审批、API、真实 MCP stdio |
+| `pytest -q` | **273 passed** | 在原有 255 项基础上新增 Git worktree 与跨文件原子提案、测试驱动有界修复循环、队列租约续期与 `epoch` fencing、AST RepoMap 增量缓存、带 SHA-256 来源校验的工作记忆、5 任务编码基准与 OpenAI/Anthropic 适配器契约 |
 | `ruff check src tests scripts` | 通过 | Python 静态检查 |
 | `node --check web/app.js` | 通过 | 浏览器脚本语法 |
 | `uv lock --check` | 通过 | 项目声明与锁文件一致 |
 | `agent-lab eval` | **10 / 10 场景通过** | 临时工作区中的审批、拒绝、恢复、冲突、幂等、预算与三种模式 |
-| CLI 操作 | 通过 | demo → resume → approve → trace → list → calls → result |
-| 浏览器操作 | 通过 | 创建任务、查看 unified diff、批准后完成、显示语法与容器状态 |
+| `agent-lab model-eval --provider reference` | **5 / 5 真实容器基准通过** | 在本机 Docker Desktop（27.4.0）下逐任务检出 Git worktree、运行 21 个受保护 unittest 用例、覆盖跨文件原子修改与 1 次失败后自动修复、验证通过后创建 Git commit（显式标注 `benchmark_harness_verification_only`） |
+| `docker build -t agent-systems-lab .` | 通过 | 构建包含 Git、锁定依赖与非 root 账户 `learner` 的完整应用镜像 |
+| CLI 与队列服务操作 | 通过 | `serve --dispatch queue` + `agent-lab worker` 心跳消费、跨文件 `multi_file` 审批与恢复、trace/calls/result 查询 |
+| 浏览器与工作台接口 | 通过 | 队列 Worker 状态栏、任务模板选择、RepoMap 面板、带来源工作记忆、跨文件 unified diff 与独立 `verification` 状态展示 |
 | MCP 协议集成 | 通过 | 独立进程 JSON-RPC 初始化、工具发现、读取/检索、路径越界拒绝、没有写工具 |
-| Anthropic adapter 合约 | 通过模拟测试 | 请求参数、工具块和 token usage 转换；不等于真实服务联调 |
+| Anthropic / OpenAI adapter 合约 | 通过模拟测试 | 请求参数、工具调用块、重试与 token usage 转换；不等于真实在线计费联调 |
 
-运行环境：macOS arm64，Python 3.11.5，单进程。完整可复演报告见 [evaluation-sample.json](evaluation-sample.json)；该报告不含密钥或个人仓库内容。
+运行环境：macOS arm64，Python 3.11.5，Docker Desktop 27.4.0，支持 `inline` 单进程与 `queue` + `LeaseWorker` 双进程模式。完整可复演报告见 [evaluation-sample.json](evaluation-sample.json) 与 [model-eval-sample.json](model-eval-sample.json)；报告均不含密钥或个人仓库内容。
 
 测试产生 1 条依赖弃用警告：当前锁定的 Starlette 提示后续更换测试 HTTP 客户端。测试现已通过，该警告不影响本次功能验证；升级依赖时应重新验证兼容性。
 
@@ -32,12 +34,13 @@
 
 ## 额外环境与准确边界
 
-- **真实 Claude 请求未执行**：交付环境没有 `ANTHROPIC_API_KEY`。配置自己账户可用的模型后，需独立验证编码效果、用量、错误和模型协议。
-- **本机 Docker 代码执行未运行**：已安装 CLI，但守护进程未启动；工具实际返回 `sandbox_unavailable`。没有回退到宿主执行代码。
+- **真实商业模型得分未冒充**：`model-eval --provider reference`（5/5）仅验证基准任务、Git worktree、Docker 测试套件与修复回环本身通畅；真实 Claude 或 OpenAI 模型的 `pass@1`、修复收益与 token 成本需在配置自有 API 密钥后实测报告。
+- **macOS Docker Desktop 与原生 Linux 内核差异**：本机 Docker Desktop（LinuxKit VM）已实测通过全部单文件与多文件容器测试套件；而 `scripts/sandbox_smoke.py` 中的内核级探针专门针对原生 Linux CI 要求 `Seccomp == 2` 且网络命名空间仅含 `lo`（macOS LinuxKit VM 默认 `Seccomp: 0` 且内核静态编译了未启用的 `tunl0/sit0` 隧道设备），因此该严格探针保持不放宽，继续在 Ubuntu GitHub Actions CI 中强制门禁。
 - CI 包含 Python 3.11 / 3.12 的回归任务，以及真实 Docker smoke job；本次均已通过，后续提交仍以对应 GitHub Actions 结果为准。
-- Dockerfile 已提供，但本机未构建应用镜像。不要把提供文件视为部署成功。
+- 应用镜像 `docker build -t agent-systems-lab .` 已在本机实测构建成功；注意应用容器本身不挂载宿主机 Docker socket，若需容器内触发沙盒执行应对接独立远程执行池。
 - 离线 demo 是确定性脚本；10 / 10 只证明当前 harness 场景回归，不代表模型成功率或真实缺陷覆盖率。
 - AST 算术 grader 不 import/exec 生成代码，只解释目标函数最后一条返回表达式的纯算术子集；不证明整个函数的控制流或副作用正确。
+- SQLite `run_leases` + `epoch` fencing 完整覆盖单机多进程 Worker 崩溃接管与僵尸写入拦截，但跨主机多节点部署仍需替换为 Postgres/etcd 等共享事务存储。
 
 ## 专门复核的失败情况
 
@@ -58,10 +61,11 @@
 
 ## 本轮增强的远端验证结果
 
-[GitHub Actions 运行42982653696](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42982653696) 对应代码提交 `8f20646`，全部成功：
+上一阶段增强的 [GitHub Actions 运行 42982653696](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42982653696)（提交 `8f20646`）及本次 P0/P1 全量升级后的最新 `Validate` 工作流均在 Ubuntu Linux 上验证：
 
-- Ubuntu / Python 3.11 与3.12：各255项测试、Ruff检查和10个隔离离线场景通过。
+- Ubuntu / Python 3.11 与 3.12：全部 **273 项测试**、Ruff 检查（`src tests scripts`）和 10 个隔离离线场景通过。
 - 真实Docker：原始bug被捕获，审批后的修复通过四项受保护测试。
+- 真实 5 任务编码基准（`agent-lab model-eval --provider reference`）：在 Linux Docker 中完成基线红灯校验、跨文件 worktree 修复、测试失败回环修复与验证门控 Git commit（5/5 通过，产物上传至 `sandbox-smoke` artifact）。
 - 真实隔离探针：非root、根/工作区只读并拒绝写入、仅loopback且外连失败、无宿主环境/哨兵文件/Docker socket、capabilities为零、NoNewPrivs与seccomp生效。
 - 5秒执行超时、2KiB输出限额、`os._exit(0)`提前退出分别产生预期状态；六个case均确认清理完成。
 

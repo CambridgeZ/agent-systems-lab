@@ -285,6 +285,13 @@ input:focus {
   justify-content: space-between;
   margin-top: 14px;
   gap: 8px;
+  flex-wrap: wrap;
+}
+.composer-selects {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
 }
 .composer-footer label {
   font-size: 10px;
@@ -357,6 +364,49 @@ select {
   padding: 17px 0;
   border-top: 1px solid #eef0e9;
   border-bottom: 1px solid #eef0e9;
+}
+.metrics-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.metrics-4 strong {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.state-box {
+  font-size: 10px;
+  line-height: 1.7;
+  background: #f6f8f3;
+  padding: 10px 12px;
+  border-radius: 5px;
+  margin-bottom: 10px;
+}
+.wm-goal {
+  color: var(--ink);
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.wm-valid {
+  color: var(--green);
+  margin-bottom: 4px;
+}
+.wm-stale {
+  color: var(--orange);
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.wm-fact {
+  font-family: ui-monospace, monospace;
+  font-size: 9.5px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.repomap-details {
+  font-size: 10px;
+  color: var(--green);
+}
+.repomap-details summary {
+  cursor: pointer;
+  margin-bottom: 6px;
 }
 .metrics > div {
   padding-left: 17px;

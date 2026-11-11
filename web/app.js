@@ -4,6 +4,11 @@ let current = null,
   token = "",
   busy = false;
 const $ = (id) => document.getElementById(id);
+const DEFAULT_PROMPTS = {
+  sample: "修复 pricing.py 的百分比折扣 bug，并验证修改。",
+  multi_file:
+    "请检查 checkout.py 与 discounts.py 的多文件结算逻辑，修复优惠封顶与应付总额缺陷并在容器中验证。",
+};
 const labels = {
   queued: "已排队",
   running: "运行中",
@@ -12,14 +17,29 @@ const labels = {
   failed: "失败",
   budget_exceeded: "预算已用尽",
 };
+const verLabels = {
+  not_run: "未运行",
+  syntax_only: "仅语法检查",
+  passed: "测试通过 ✓",
+  failed: "测试未通过",
+  unavailable: "容器不可用",
+  unknown: "结果未知",
+};
 const eventNames = {
   tool_audit: "工具审计",
   patch_proposed: "补丁已提出",
   patch_applied: "补丁已应用",
   created: "任务已创建",
+  lease_claimed: "Worker 领取租约",
+  worker_fenced: "过期 Worker 被拦截",
   model_start: "模型开始决策",
   model_end: "模型返回",
   tool_result: "工具执行完成",
+  working_memory_updated: "工作记忆已更新",
+  verification_updated: "验证状态更新",
+  repair_round_started: "进入自动修复轮次",
+  repair_exhausted: "修复轮次已耗尽",
+  git_committed: "受控 Git 已提交",
   waiting_approval: "补丁等待审批",
   approval: "人工审批",
   completed: "任务完成",
@@ -112,6 +132,10 @@ function renderEvents(events) {
     );
     box.append(head);
     if (p.worker) box.append(el("small", "执行者 / " + p.worker));
+    if (p.owner_id)
+      box.append(el("small", "租约持有者 / " + p.owner_id + " (epoch=" + p.epoch + ")"));
+    if (p.commit_sha)
+      box.append(el("small", "Git Commit / " + p.commit_sha.slice(0, 12)));
     if (p.result?.code) box.append(el("small", "结果 / " + p.result.code));
     const detail = el("details");
     detail.append(
@@ -134,8 +158,16 @@ function renderProposals(proposals, status) {
   );
   for (const p of pending) {
     const box = el("div", undefined, "proposal");
+    const titleText =
+      p.paths && p.paths.length > 1
+        ? "原子变更集 (" + p.paths.length + " 个文件): " + p.paths.join(", ")
+        : p.path;
     box.append(
-      el("strong", p.path),
+      el("strong", titleText),
+      ...(p.summary ? [el("div", p.summary, "muted")] : []),
+      ...(p.base_commit
+        ? [el("div", "绑定基线 commit: " + p.base_commit.slice(0, 12), "muted")]
+        : []),
       el(
         "pre",
         p.diff ||
@@ -175,30 +207,77 @@ async function refreshUntilRunning() {
   await new Promise((r) => setTimeout(r, 150));
   await refreshRun();
 }
+function renderWorkingMemory(wm) {
+  const box = $("wm-box");
+  if (!box) return;
+  box.replaceChildren();
+  if (!wm) {
+    box.textContent = "本任务尚未写入结构化工作记忆。";
+    return;
+  }
+  if (wm.goal) box.append(el("div", "目标：" + wm.goal, "wm-goal"));
+  const summary =
+    "有效事实 " +
+    (wm.valid_facts?.length || 0) +
+    " 条 · 过期(stale) " +
+    (wm.stale_count || 0) +
+    " 条 · 待办 " +
+    (wm.todos?.length || 0) +
+    " 项";
+  box.append(el("div", summary, wm.stale_count ? "wm-stale" : "wm-valid"));
+  for (const f of [...(wm.valid_facts || []), ...(wm.stale_facts || [])]) {
+    const tag = f.status === "stale" ? "[STALE:" + f.stale_reason + "] " : "[VALID] ";
+    box.append(el("div", tag + f.source_ref + " — " + f.claim, "wm-fact"));
+  }
+}
 // 轮询只观察状态；浏览器关闭后服务器继续工作。SSE 端点提供给需要流式事件的客户端。
 async function refreshRun() {
   if (!current) return;
   const id = current;
   try {
-    const [run, events] = await Promise.all([
+    const [run, events, repomap] = await Promise.all([
       api("/runs/" + id),
       api("/runs/" + id + "/events"),
+      api("/runs/" + id + "/repomap").catch(() => null),
     ]);
     if (current !== id) return;
     $("status").className = "status " + run.status;
     $("status").textContent = labels[run.status] || run.status;
     $("steps").textContent = run.steps;
-    $("tokens").textContent =
+    const ver = run.verification || {};
+    const repairSuffix = ver.repair_rounds_used
+      ? " (修复" + ver.repair_rounds_used + "轮)"
+      : "";
+    $("verification-label").textContent =
+      (verLabels[ver.status] || ver.status || "—") + repairSuffix;
+    if (run.git?.base_commit) {
+      const baseShort = run.git.base_commit.slice(0, 7);
+      const commitShort = (ver.committed_sha || run.git.committed_sha || "").slice(0, 7);
+      $("git-label").textContent = commitShort
+        ? baseShort + " → " + commitShort
+        : baseShort + " (未提交)";
+    } else {
+      $("git-label").textContent = "静态目录副本";
+    }
+    const tokText =
       run.provider === "demo"
-        ? "DEMO / 0"
+        ? "0 tok"
         : (run.input_tokens + run.output_tokens).toLocaleString();
-    $("mode-label").textContent = run.mode;
+    const epochText = run.lease?.epoch ? "E" + run.lease.epoch + " · " : "";
+    $("lease-tokens").textContent = epochText + run.mode + " · " + tokText;
     $("answer-card").classList.toggle("hidden", !run.answer && !run.error);
     $("answer").textContent = run.answer || "运行停止：" + run.error;
+    const leaseActive =
+      run.lease && ["queued", "claimed"].includes(run.lease.queue_state);
     $("resume").classList.toggle(
       "hidden",
       !["failed", "running", "queued"].includes(run.status),
     );
+    renderWorkingMemory(run.working_memory);
+    if (repomap?.map) {
+      $("repomap-details").classList.remove("hidden");
+      $("repomap-pre").textContent = repomap.map;
+    }
     renderEvents(events);
     renderProposals(
       run.proposals.map((p) => ({
@@ -209,12 +288,21 @@ async function refreshRun() {
       })),
       run.status,
     );
-    if (["queued", "running"].includes(run.status))
+    if (["queued", "running"].includes(run.status) || leaseActive)
       timer = setTimeout(refreshRun, 700);
     else await loadRuns();
   } catch (e) {
     toast(e.message);
   }
+}
+if ($("template")) {
+  $("template").onchange = () => {
+    const next = $("template").value;
+    const cur = $("prompt").value.trim();
+    if (cur === DEFAULT_PROMPTS.sample || cur === DEFAULT_PROMPTS.multi_file) {
+      $("prompt").value = DEFAULT_PROMPTS[next];
+    }
+  };
 }
 $("start").onclick = async () => {
   if (busy) return;
@@ -226,6 +314,7 @@ $("start").onclick = async () => {
       body: JSON.stringify({
         prompt: $("prompt").value,
         mode: $("mode").value,
+        template: $("template") ? $("template").value : "sample",
       }),
     });
     await selectRun(run.id);
@@ -277,7 +366,18 @@ async function init() {
   try {
     const c = await api("/config");
     $("provider").textContent =
-      c.provider === "demo" ? "离线 DEMO · 本机运行" : "Claude · 真实模型";
+      c.provider === "demo"
+        ? "离线 DEMO · " + (c.dispatch_mode === "queue" ? "队列模式" : "内联模式")
+        : c.provider.toUpperCase() + " · 真实模型";
+    if ($("worker-stat")) {
+      const activeWorkers = (c.workers || []).filter((w) => w.status !== "stopped");
+      $("worker-stat").textContent =
+        "调度：" +
+        (c.dispatch_mode || "inline") +
+        " · 已登记 Worker " +
+        activeWorkers.length +
+        " 个";
+    }
     $("knowledge").textContent =
       c.knowledge.documents +
       " 篇知识笔记 · " +

@@ -20,8 +20,10 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
-from agent_lab.storage import Storage, digest
+from agent_lab.git_repo import GitRepoError, verify_worktree_baseline, worktree_status
+from agent_lab.repomap import RepoMapIndex
 from agent_lab.sandbox import SandboxRunner
+from agent_lab.storage import Storage, digest
 
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_FILES = 128
@@ -53,7 +55,18 @@ def _string(description: str, maximum: int = 500) -> dict:
 class ToolRegistry:
     """一个运行对应一个 Registry；审批入口不在 definitions() 中暴露给模型。"""
 
-    def __init__(self, storage: Storage, workspace: Path, knowledge: Any, run_id: str):
+    def __init__(
+        self,
+        storage: Storage,
+        workspace: Path,
+        knowledge: Any,
+        run_id: str,
+        *,
+        test_oracles: dict[str, str] | None = None,
+        expected_tests: int | None = None,
+        base_commit: str | None = None,
+        expected_epoch: int | None = None,
+    ):
         self.storage = storage
         self.workspace = Path(workspace).absolute()
         if self.workspace.is_symlink() or not self.workspace.is_dir():
@@ -61,6 +74,11 @@ class ToolRegistry:
         self.workspace = self.workspace.resolve()
         self.knowledge = knowledge
         self.run_id = run_id
+        self.test_oracles = dict(test_oracles) if test_oracles else None
+        self.expected_tests = expected_tests
+        self.base_commit = base_commit
+        self.expected_epoch = expected_epoch
+        self._repomap = RepoMapIndex(self.workspace)
         with _LOCKS_GUARD:
             self._lock = _LOCKS.setdefault(str(self.workspace), threading.RLock())
         self._specs = self._build_definitions()
@@ -70,10 +88,56 @@ class ToolRegistry:
     def _build_definitions() -> list[dict]:
         path = _string("仓库内相对路径，例如 pricing.py；不能是绝对路径、URL 或符号链接。", 240)
         query = _string("简短搜索词；不接受 URL，不发起网络请求。")
+        edit_item = {
+            "type": "object",
+            "properties": {
+                "path": path,
+                "old_text": _string("在该文件中必须唯一匹配一次的原始文本片段。", 8192),
+                "new_text": {
+                    "type": "string",
+                    "maxLength": 8192,
+                    "description": "替换后的新代码片段；可为空字符串以删除目标片段。",
+                },
+            },
+            "required": ["path", "old_text", "new_text"],
+            "additionalProperties": False,
+        }
         return [
             {
                 "name": "repo_list",
                 "description": "列出当前教学仓库的文件。先用它了解结构，再读取相关文件。隐藏文件和符号链接不参与索引，结果有数量限制。此工具不修改代码。",
+                "input_schema": _schema(),
+            },
+            {
+                "name": "repo_map",
+                "description": "生成有字符预算的 Python AST 代码地图（模块导入、类、函数签名与行号），按跨文件依赖度排序；文件变更后自动检测过期并增量刷新。",
+                "input_schema": _schema(
+                    {
+                        "max_chars": {
+                            "type": "integer",
+                            "minimum": 200,
+                            "maximum": 6000,
+                            "description": "代码地图字符预算上限，默认 2000。",
+                        },
+                        "focus_query": {
+                            "type": "string",
+                            "maxLength": 200,
+                            "description": "可选关注词，提高匹配符号与模块在地图中的排序权重。",
+                        },
+                    }
+                ),
+            },
+            {
+                "name": "symbol_search",
+                "description": "基于 AST 跨文件定位函数、类或方法的定义签名、行号以及调用/导入位置，并返回当前索引摘要供核验。",
+                "input_schema": _schema(
+                    {"symbol": _string("要查找的函数名、类名或方法名。", 120)},
+                    ["symbol"],
+                ),
+            },
+            {
+                "name": "repo_git_status",
+                "description": "只读检查当前工作区的 Git worktree 基线 commit、已修改文件列表及相对基线的 unified diff。",
                 "input_schema": _schema(),
             },
             {
@@ -108,6 +172,27 @@ class ToolRegistry:
                 ),
             },
             {
+                "name": "propose_changeset",
+                "description": "提出跨多个 Python 业务文件的整组原子变更提案（最多 6 个文件），不立即写入。全部文件均通过唯一匹配与 AST 语法检查后才生成单个待审批提案；禁止修改 tests 目录。",
+                "input_schema": _schema(
+                    {
+                        "edits": {
+                            "type": "array",
+                            "items": edit_item,
+                            "minItems": 1,
+                            "maxItems": 6,
+                            "description": "整组文件替换列表，同一文件路径不可重复出现。",
+                        },
+                        "summary": {
+                            "type": "string",
+                            "maxLength": 300,
+                            "description": "本次跨文件修改的简短工程说明。",
+                        },
+                    },
+                    ["edits"],
+                ),
+            },
+            {
                 "name": "verify_python",
                 "description": "只解析指定 Python 文件的 AST 语法，不导入或执行代码。可用于补丁应用后的最低限度验证。语法通过不能证明业务正确，也不等同于单元测试通过。运行测试应使用 sandbox_test。",
                 "input_schema": _schema({"path": path}, ["path"]),
@@ -129,14 +214,16 @@ class ToolRegistry:
             if name not in self._validators:
                 raise ToolError("unknown_tool", "工具不存在，不能动态执行函数名。")
             self._validators[name].validate(arguments)
-            if name == "propose_patch":
+            if name in {"propose_patch", "propose_changeset"}:
                 # 幂等键只来自 Runtime 的 tool_use id，不接受模型自行传入隐藏参数。
-                result = self.propose_patch(**arguments, operation_id=call_id)
+                result = getattr(self, name)(**arguments, operation_id=call_id)
             else:
                 result = getattr(self, name)(**arguments)
         except ValidationError as exc:
             result = {"ok": False, "code": "invalid_arguments", "error": exc.message[:500]}
         except ToolError as exc:
+            result = {"ok": False, "code": exc.code, "error": str(exc)}
+        except GitRepoError as exc:
             result = {"ok": False, "code": exc.code, "error": str(exc)}
         except (ValueError, OSError, UnicodeError) as exc:
             result = {"ok": False, "code": "tool_error", "error": str(exc)[:500]}
@@ -218,6 +305,15 @@ class ToolRegistry:
             "possibly_truncated": len(files) >= _MAX_FILES,
         }
 
+    def repo_map(self, max_chars: int = 2000, focus_query: str = "") -> dict:
+        return self._repomap.build_map(max_chars=max_chars, focus_query=focus_query)
+
+    def symbol_search(self, symbol: str) -> dict:
+        return self._repomap.search_symbol(symbol)
+
+    def repo_git_status(self) -> dict:
+        return worktree_status(self.workspace, base_commit=self.base_commit)
+
     def repo_read(self, path: str) -> dict:
         content = self._path(path).read_text(encoding="utf-8")
         return {
@@ -259,29 +355,78 @@ class ToolRegistry:
 
     @staticmethod
     def _proposal_result(proposal: dict, *, replayed: bool = False) -> dict:
-        diff = "".join(
-            difflib.unified_diff(
-                proposal["old_content"].splitlines(keepends=True),
-                proposal["new_content"].splitlines(keepends=True),
-                fromfile=f"a/{proposal['path']}",
-                tofile=f"b/{proposal['path']}",
+        files = proposal.get("files") or [
+            {
+                "path": proposal["path"],
+                "old_content": proposal["old_content"],
+                "new_content": proposal["new_content"],
+            }
+        ]
+        diffs = []
+        for entry in files:
+            diffs.append(
+                "".join(
+                    difflib.unified_diff(
+                        entry["old_content"].splitlines(keepends=True),
+                        entry["new_content"].splitlines(keepends=True),
+                        fromfile=f"a/{entry['path']}",
+                        tofile=f"b/{entry['path']}",
+                    )
+                )
             )
-        )
-        return {
+        diff = "".join(diffs)
+        result = {
             "ok": True,
             "proposal_id": proposal["id"],
+            "kind": proposal.get("kind", "single_file"),
             "path": proposal["path"],
+            "paths": proposal.get("paths", [proposal["path"]]),
             "diff": diff,
             "status": proposal["status"],
             "applied": proposal["applied"],
             "requires_approval": proposal["status"] in {"pending", "approved"} and not proposal["applied"],
             "replayed": replayed,
         }
+        if proposal.get("base_commit"):
+            result["base_commit"] = proposal["base_commit"]
+        return result
+
+    def _prepare_validated_edits(self, edits: list[dict[str, str]]) -> list[dict[str, str]]:
+        if self.base_commit:
+            verify_worktree_baseline(self.workspace, self.base_commit)
+        seen: set[str] = set()
+        prepared: list[dict[str, str]] = []
+        for item in edits:
+            path = item["path"]
+            if path in seen:
+                raise ToolError("duplicate_path", f"同一变更集不能重复修改同一路径：{path}")
+            seen.add(path)
+            source = self._path(path, editable=True)
+            original = source.read_text(encoding="utf-8")
+            old_text = item["old_text"]
+            new_text = item["new_text"]
+            if not old_text or original.count(old_text) != 1:
+                raise ToolError(
+                    "ambiguous_patch",
+                    f"{path} 中的 old_text 必须在当前文件恰好出现一次，请重新读取确认。",
+                )
+            proposed = original.replace(old_text, new_text, 1)
+            if proposed == original:
+                raise ToolError("empty_patch", f"{path} 的补丁没有改变内容。")
+            if len(proposed.encode("utf-8")) > _MAX_FILE_BYTES:
+                raise ToolError("file_too_large", f"{path} 补丁结果超过文件大小限制。")
+            try:
+                ast.parse(proposed, filename=path)
+            except SyntaxError as exc:
+                raise ToolError("syntax_error", f"{path} 补丁无法解析：第 {exc.lineno} 行 {exc.msg}") from exc
+            prepared.append({"path": path, "old_content": original, "new_content": proposed})
+        return prepared
 
     def propose_patch(
         self, path: str, old_text: str, new_text: str, *, operation_id: str | None = None
     ) -> dict:
         with self._lock:
+            self.storage.verify_epoch(self.run_id, self.expected_epoch)
             if operation_id is not None:
                 # 若进程在提案创建后、结果 checkpoint 前退出，先找回原提案。
                 # 不再次读取已变化的源文件来制造“同一个调用的第二份提案”。
@@ -296,82 +441,180 @@ class ToolRegistry:
                     ):
                         raise ToolError("proposal_operation_conflict", "同一调用 ID 不能替换为另一份补丁。")
                     return self._proposal_result(previous, replayed=True)
-            source = self._path(path, editable=True)
-            original = source.read_text(encoding="utf-8")
-            if not old_text or original.count(old_text) != 1:
-                raise ToolError("ambiguous_patch", "old_text 必须在当前文件中恰好出现一次，请重新读取。")
-            proposed = original.replace(old_text, new_text, 1)
-            if proposed == original:
-                raise ToolError("empty_patch", "补丁没有改变内容。")
-            if len(proposed.encode("utf-8")) > _MAX_FILE_BYTES:
-                raise ToolError("file_too_large", "补丁结果超过文件大小限制。")
-            try:
-                ast.parse(proposed, filename=path)
-            except SyntaxError as exc:
-                raise ToolError("syntax_error", f"补丁无法解析：第 {exc.lineno} 行 {exc.msg}") from exc
-            proposal = self.storage.create_proposal(self.run_id, path, original, proposed, operation_id)
+            prepared = self._prepare_validated_edits(
+                [{"path": path, "old_text": old_text, "new_text": new_text}]
+            )
+            proposal = self.storage.create_proposal(
+                self.run_id,
+                path,
+                prepared[0]["old_content"],
+                prepared[0]["new_content"],
+                operation_id=operation_id,
+                expected_epoch=self.expected_epoch,
+                base_commit=self.base_commit,
+            )
             result = self._proposal_result(proposal)
             self.storage.add_event(
                 self.run_id,
                 "patch_proposed",
-                {"proposal_id": proposal["id"], "path": path, "diff": result["diff"]},
+                {
+                    "proposal_id": proposal["id"],
+                    "kind": "single_file",
+                    "path": path,
+                    "paths": [path],
+                    "diff": result["diff"],
+                },
             )
             return result
 
-    def apply_proposal(self, proposal_id: str) -> dict:
+    def propose_changeset(
+        self,
+        edits: list[dict[str, str]],
+        summary: str = "",
+        *,
+        operation_id: str | None = None,
+    ) -> dict:
+        """提出多文件整组原子提案；任一文件校验失败则整组拒绝，不产生半成品提案。"""
+        with self._lock:
+            self.storage.verify_epoch(self.run_id, self.expected_epoch)
+            if operation_id is not None:
+                previous = self.storage.get_proposal_by_operation(self.run_id, operation_id)
+                if previous is not None:
+                    prev_files = previous.get("files", [])
+                    if len(prev_files) != len(edits):
+                        raise ToolError("proposal_operation_conflict", "同一调用 ID 不能替换为另一组补丁。")
+                    for prev_entry, edit in zip(prev_files, edits):
+                        orig = prev_entry["old_content"]
+                        if (
+                            prev_entry["path"] != edit["path"]
+                            or not edit["old_text"]
+                            or orig.count(edit["old_text"]) != 1
+                            or orig.replace(edit["old_text"], edit["new_text"], 1) != prev_entry["new_content"]
+                        ):
+                            raise ToolError("proposal_operation_conflict", "同一调用 ID 不能替换为另一组补丁。")
+                    return self._proposal_result(previous, replayed=True)
+            prepared = self._prepare_validated_edits(edits)
+            proposal = self.storage.create_changeset_proposal(
+                self.run_id,
+                files=prepared,
+                summary=summary,
+                base_commit=self.base_commit,
+                operation_id=operation_id,
+                expected_epoch=self.expected_epoch,
+            )
+            result = self._proposal_result(proposal)
+            self.storage.add_event(
+                self.run_id,
+                "patch_proposed",
+                {
+                    "proposal_id": proposal["id"],
+                    "kind": proposal["kind"],
+                    "summary": proposal.get("summary", ""),
+                    "path": proposal["path"],
+                    "paths": proposal["paths"],
+                    "base_commit": proposal.get("base_commit"),
+                    "diff": result["diff"],
+                },
+            )
+            return result
+
+    def apply_proposal(self, proposal_id: str, expected_epoch: int | None = None) -> dict:
         """审批后的版本绑定写入；崩溃重试可识别已经落盘的新内容。
 
         文件系统与 SQLite 不是同一个事务。先原子替换文件，再标记 applied；
-        如果中间崩溃，下次根据 new_sha256 补记 applied。此保证不等于任意
-        外部副作用的 exactly-once；多进程生产服务还需工作区租约或文件锁。
+        如果中间崩溃，下次根据 new_sha256 补记 applied。对于多文件变更集，
+        必须先校验 Git 基线与所有目标文件摘要均未偏离，再统一落盘替换。
         """
+        epoch = expected_epoch if expected_epoch is not None else self.expected_epoch
         with self._lock:
+            self.storage.verify_epoch(self.run_id, epoch)
             proposal = self.storage.get_proposal(proposal_id)
             if not proposal or proposal["run_id"] != self.run_id:
                 return {"ok": False, "code": "proposal_not_found", "error": "该运行中没有此补丁。"}
             if proposal["status"] != "approved":
                 return {"ok": False, "code": "approval_required", "error": "补丁尚未获人类批准。"}
             try:
-                target = self._path(proposal["path"], editable=True)
-                current = target.read_text(encoding="utf-8")
-                current_hash = digest(current)
-                if current_hash == proposal["new_sha256"]:
-                    self.storage.mark_proposal_applied(proposal_id)
+                if proposal.get("base_commit"):
+                    verify_worktree_baseline(self.workspace, proposal["base_commit"])
+                file_entries = proposal.get("files") or [
+                    {
+                        "path": proposal["path"],
+                        "old_content": proposal["old_content"],
+                        "new_content": proposal["new_content"],
+                        "old_sha256": proposal["old_sha256"],
+                        "new_sha256": proposal["new_sha256"],
+                    }
+                ]
+                targets: list[tuple[dict, Path, str]] = []
+                for entry in file_entries:
+                    target = self._path(entry["path"], editable=True)
+                    current = target.read_text(encoding="utf-8")
+                    targets.append((entry, target, digest(current)))
+
+                if all(cur_hash == entry["new_sha256"] for entry, _, cur_hash in targets):
+                    self.storage.mark_proposal_applied(proposal_id, expected_epoch=epoch)
                     return {
                         "ok": True,
                         "proposal_id": proposal_id,
                         "path": proposal["path"],
+                        "paths": [entry["path"] for entry, _, _ in targets],
                         "already_applied": True,
                     }
-                if current_hash != proposal["old_sha256"] or proposal["applied"]:
+                if proposal["applied"] or any(
+                    cur_hash != entry["old_sha256"] for entry, _, cur_hash in targets
+                ):
                     raise ToolError(
                         "version_conflict", "审批后文件发生变化，拒绝覆盖；请重新读取并提出补丁。"
                     )
-                # 临时文件与目标在同一目录，os.replace 是单文件原子替换。
-                fd, temporary = tempfile.mkstemp(prefix=".agent-patch-", dir=target.parent)
+                staged: list[tuple[dict, Path, str]] = []
+                swapped: list[tuple[Path, str]] = []
                 try:
-                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                        handle.write(proposal["new_content"])
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    os.chmod(temporary, target.stat().st_mode & 0o777)
-                    self._path(proposal["path"], editable=True)
-                    os.replace(temporary, target)
+                    for entry, target, _ in targets:
+                        fd, temporary = tempfile.mkstemp(prefix=".agent-patch-", dir=target.parent)
+                        staged.append((entry, target, temporary))
+                        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                            handle.write(entry["new_content"])
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        os.chmod(temporary, target.stat().st_mode & 0o777)
+                    # 真正替换前再次确认世代令牌未被抢占，收窄多 Worker 竞争窗口。
+                    self.storage.verify_epoch(self.run_id, epoch)
+                    for entry, target, temporary in staged:
+                        self._path(entry["path"], editable=True)
+                        os.replace(temporary, target)
+                        swapped.append((target, entry["old_content"]))
+                except BaseException:
+                    # 若多文件替换中途遇到底层异常，尽力恢复已替换文件的旧内容。
+                    for target, old_content in reversed(swapped):
+                        try:
+                            target.write_text(old_content, encoding="utf-8")
+                        except OSError:
+                            pass
+                    raise
                 finally:
-                    if os.path.exists(temporary):
-                        os.unlink(temporary)
-                self.storage.mark_proposal_applied(proposal_id)
+                    for _, _, temporary in staged:
+                        if os.path.exists(temporary):
+                            os.unlink(temporary)
+                self.storage.mark_proposal_applied(proposal_id, expected_epoch=epoch)
                 self.storage.add_event(
                     self.run_id,
                     "patch_applied",
-                    {"proposal_id": proposal_id, "path": proposal["path"], "sha256": proposal["new_sha256"]},
+                    {
+                        "proposal_id": proposal_id,
+                        "path": proposal["path"],
+                        "paths": [entry["path"] for entry, _, _ in targets],
+                        "sha256": proposal["new_sha256"],
+                    },
                 )
                 return {
                     "ok": True,
                     "proposal_id": proposal_id,
                     "path": proposal["path"],
+                    "paths": [entry["path"] for entry, _, _ in targets],
                     "already_applied": False,
                 }
+            except GitRepoError as exc:
+                return {"ok": False, "code": exc.code, "error": str(exc)}
             except ToolError as exc:
                 return {"ok": False, "code": exc.code, "error": str(exc)}
             except (OSError, UnicodeError) as exc:
@@ -403,6 +646,16 @@ class ToolRegistry:
 
     def sandbox_test(self) -> dict:
         """固定测试入口；隔离策略由代码决定，模型不能选择挂载、网络、镜像或 argv。"""
+        if self.test_oracles is not None:
+            if not self.expected_tests:
+                raise ToolError("test_oracle_modified", "缺少预期测试数量配置。")
+            for rel_path, expected_sha in self.test_oracles.items():
+                oracle = self._path(rel_path)
+                if digest(oracle.read_text(encoding="utf-8")) != expected_sha:
+                    raise ToolError("test_oracle_modified", f"验收测试 {rel_path} 与受保护基线不一致。")
+            return SandboxRunner().run_suite(
+                self.workspace, self.test_oracles, expected_tests=self.expected_tests
+            )
         oracle = self._path("tests/test_pricing.py")
         if digest(oracle.read_text(encoding="utf-8")) != _PRICING_TEST_SHA256:
             raise ToolError("test_oracle_modified", "验收测试与内置版本不一致，拒绝给出测试通过结论。")

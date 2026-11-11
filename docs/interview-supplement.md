@@ -88,7 +88,7 @@
 
 **追问：**网络分区期间，旧 worker 不知道自己已经失去所有权，谁负责阻止它？
 
-**项目对照：**当前是单进程后台任务和工作区锁，没有跨主机 lease 或 fencing。可用“旧 worker 恢复后写入被拒绝”的集成测试定义生产扩展验收。
+**项目对照：**已实现 [`run_leases` + `LeaseWorker` + 单调递增 `epoch` fencing](../src/agent_lab/lease.py)：租约过期后新 Worker 接管会使 `epoch` 加一，滞后恢复的旧 Worker 无论续租、更新 `runs`、登记 `tool_calls`、创建提案还是应用文件补丁都会触发 `StaleEpochError`（见 [`test_lease_fencing.py`](../tests/test_lease_fencing.py)）。当前底层基于单机 SQLite WAL，跨主机部署仍需替换为 Postgres/etcd 共享事务存储。
 
 ### 55. [P0] 用户取消任务，为什么不等于已发生的动作全部回滚？
 
@@ -120,7 +120,7 @@
 
 **追问：**摘要说补丁已应用，文件实际还是旧版本，应该信哪一份？
 
-**项目对照：**当前 SQLite、事件与工作区文件分开存在。上下文优化应保留能重新取证的标识，而不是把完整执行状态塞入摘要后丢弃原记录。
+**项目对照：**当前 SQLite 调用账本、分离 HEAD 的 Git worktree（绑定 40 位 `base_commit` 与验证门控提交 [`git_repo.py`](../src/agent_lab/git_repo.py)）和带来源哈希的[结构化工作记忆](../src/agent_lab/working_memory.py)各司其职：审批事实以 `HARNESS_STATE` 为准，工作记忆事实绑定文件或工具结果 SHA-256 并在文件改动后自动降级为 `stale`。
 
 ## 十、代码检索、记忆与信任边界
 
@@ -130,7 +130,7 @@
 
 **追问：**找到同名函数的错误重载、不同语言绑定或生成文件，怎样确认真正调用路径？
 
-**项目对照：**当前是小型仓库文本检索，没有 Tree-sitter/LSP 索引、调用图或全仓库语义检索。升级应使用符号定位准确率和任务成功率验收。
+**项目对照：**已实现纯标准库 AST 的 [`RepoMapIndex`](../src/agent_lab/repomap.py)（提供 `repo_map` 与 `symbol_search`），按跨文件引用度排序、严格遵守字符预算并按单文件 SHA-256 增量刷新失效文件（见 [`test_repomap.py`](../tests/test_repomap.py)）。它覆盖 Python 静态符号骨架，但仍不等同于多语言 Tree-sitter 或带完整类型解析的 LSP。
 
 ### 60. [P1] Agentic RAG 一定比固定检索更好吗？
 
@@ -178,7 +178,7 @@
 
 **追问：**用户要求删除某条信息，摘要、向量索引、缓存里仍有副本怎么办？
 
-**项目对照：**当前是用户显式写入的最小键值记忆，不具备完整删除传播、自动事实合并或记忆质量评估。可从可审计的版本化记忆练习扩展。
+**项目对照：**跨会话 `memories` 表保持用户显式键值笔记；任务内[结构化工作记忆](../src/agent_lab/working_memory.py)则强制校验每条 `fact` 引用的文件或 `tool_calls` SHA-256，并在目标文件被补丁修改后自动将旧事实标为 `stale`（`file_hash_changed`，见 [`test_working_memory.py`](../tests/test_working_memory.py)）。跨会话记忆的向量索引级撤回传播仍属于扩展。
 
 ## 十一、代码 Agent 的评测与观察
 
@@ -188,7 +188,7 @@
 
 **追问：**CPU/内存不同，或一个系统允许更多尝试，排行榜百分比可以直接比较吗？
 
-**项目对照：**当前 10 个场景是 harness 回归，不是 SWE-bench 成绩。资源也影响可靠性和可采用策略，已有专门研究；复现实验应固定并记录资源。[Anthropic 研究](https://www.anthropic.com/research/infrastructure-noise)
+**项目对照：**除 10 个控制流回归外，已新增 5 任务编码基准 [`model_evals.py`](../src/agent_lab/model_evals.py)（[`data/evals/coding_benchmark/`](../data/evals/coding_benchmark)），在独立 Git worktree 与受限 Docker 容器中运行真实单测、支持有界修复回环，并严格拆分 `model_failure` 与 `infrastructure_failure`。无外部密钥时 `--provider reference` 显式标记 `benchmark_harness_verification_only`（见 [`model-eval-sample.json`](model-eval-sample.json)），绝不冒充真实 LLM 成绩。[Anthropic 研究](https://www.anthropic.com/research/infrastructure-noise)
 
 ### 67. [P1] 怎样减少训练数据污染、公开补丁泄漏和 grader 过拟合？
 

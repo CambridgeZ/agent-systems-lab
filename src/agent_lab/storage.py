@@ -1,8 +1,9 @@
-"""SQLite 持久化：把 Agent 的执行状态与模型上下文分开保存。
+"""SQLite 持久化、任务队列租约与单调递增 Fencing Token。
 
-模型只看到当前上下文；数据库保留完整轨迹、待审批补丁和跨会话笔记。每次
-操作使用独立连接，避免 FastAPI 后台线程共用连接。这里是单机教学存储，
-不声称具备分布式工作队列、租约或多个主机间的 exactly-once 保证。
+模型只看到有界上下文；数据库保留完整轨迹、待审批补丁集、调用账本、跨会话笔记
+以及本机多 Worker 协调所需的队列租约与递增世代（epoch / fencing token）。
+此存储可在同一主机共享 SQLite WAL 的多个 Worker 进程间实现过期接管与过期写拦截；
+跨多台物理机器的高可用仍需替换为 PostgreSQL 等网络事务存储。
 """
 
 from __future__ import annotations
@@ -10,11 +11,16 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+class StaleEpochError(RuntimeError):
+    """旧 Worker 持有的 fencing token 已过期，拒绝写入状态、工具账本或补丁产物。"""
 
 
 def _now() -> str:
@@ -84,6 +90,29 @@ class Storage:
                     PRIMARY KEY(run_id, call_id)
                 );
                 CREATE INDEX IF NOT EXISTS tool_calls_run_status ON tool_calls(run_id, status);
+                CREATE TABLE IF NOT EXISTS run_leases (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(id),
+                    queue_state TEXT NOT NULL CHECK(queue_state IN (
+                        'idle', 'queued', 'claimed', 'waiting_approval', 'completed', 'failed', 'budget_exceeded'
+                    )),
+                    action TEXT NOT NULL DEFAULT 'execute',
+                    owner_id TEXT,
+                    epoch INTEGER NOT NULL DEFAULT 0,
+                    lease_until REAL,
+                    heartbeat_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS run_leases_claimable ON run_leases(queue_state, lease_until);
+                CREATE TABLE IF NOT EXISTS worker_nodes (
+                    worker_id TEXT PRIMARY KEY,
+                    pid INTEGER NOT NULL,
+                    host TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    active_run_id TEXT,
+                    active_epoch INTEGER,
+                    status TEXT NOT NULL
+                );
                 """
             )
             # 给已有 v0.1 数据库做加法迁移，不重建、不删除已有审批对象。
@@ -129,7 +158,192 @@ class Storage:
         }
         with self._connect() as con:
             con.execute("INSERT INTO runs VALUES (?, ?, ?)", (run["id"], now, _dump(run)))
+            con.execute(
+                "INSERT INTO run_leases(run_id, queue_state, action, owner_id, epoch, lease_until, heartbeat_at, updated_at) "
+                "VALUES (?, 'idle', 'execute', NULL, 0, NULL, NULL, ?)",
+                (run["id"], now),
+            )
         return run
+
+    @staticmethod
+    def _verify_epoch_tx(con: sqlite3.Connection, run_id: str, expected_epoch: int | None) -> None:
+        if expected_epoch is None:
+            return
+        row = con.execute(
+            "SELECT epoch, queue_state, owner_id FROM run_leases WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if row is None or row["epoch"] != expected_epoch or row["queue_state"] != "claimed":
+            actual = row["epoch"] if row is not None else None
+            state = row["queue_state"] if row is not None else None
+            raise StaleEpochError(
+                f"fencing_token_rejected: run={run_id} expected_epoch={expected_epoch} actual_epoch={actual} state={state}"
+            )
+
+    def verify_epoch(self, run_id: str, expected_epoch: int | None) -> None:
+        """在工作区写文件或 Git 提交前校验当前执行世代仍有效。"""
+        if expected_epoch is None:
+            return
+        with self._connect() as con:
+            self._verify_epoch_tx(con, run_id, expected_epoch)
+
+    def enqueue_run(self, run_id: str, action: str = "execute") -> dict:
+        """将任务放入持久队列等待独立 Worker 领取；若已在排队则保持幂等。"""
+        if action not in {"execute", "resume"}:
+            raise ValueError("queue_action_invalid")
+        now = _now()
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if not con.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone():
+                raise KeyError("run_not_found")
+            row = con.execute("SELECT * FROM run_leases WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                con.execute(
+                    "INSERT INTO run_leases VALUES (?, 'queued', ?, NULL, 0, NULL, NULL, ?)",
+                    (run_id, action, now),
+                )
+            else:
+                # 如果另一个存活 Worker 仍在有效租约期内持有任务，拒绝重复入队覆盖。
+                if row["queue_state"] == "claimed" and (row["lease_until"] or 0.0) > time.time():
+                    raise ValueError("run_currently_claimed")
+                con.execute(
+                    "UPDATE run_leases SET queue_state='queued', action=?, owner_id=NULL, lease_until=NULL, updated_at=? WHERE run_id=?",
+                    (action, now, run_id),
+                )
+            updated = con.execute("SELECT * FROM run_leases WHERE run_id=?", (run_id,)).fetchone()
+        return dict(updated)
+
+    def claim_next_run(
+        self,
+        owner_id: str,
+        ttl_seconds: float = 15.0,
+        run_id: str | None = None,
+        now_ts: float | None = None,
+    ) -> dict | None:
+        """领取待执行或租约已过期的任务，单调递增 epoch 作为 fencing token。"""
+        self._identifier(owner_id, "owner_id")
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, (int, float)) or not 0.2 <= ttl_seconds <= 600:
+            raise ValueError("lease_ttl_invalid")
+        ts = time.time() if now_ts is None else float(now_ts)
+        now = _now()
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if run_id is not None:
+                row = con.execute(
+                    "SELECT * FROM run_leases WHERE run_id=? AND "
+                    "(queue_state IN ('idle', 'queued') OR (queue_state='claimed' AND lease_until <= ?))",
+                    (run_id, ts),
+                ).fetchone()
+            else:
+                row = con.execute(
+                    "SELECT * FROM run_leases WHERE queue_state='queued' "
+                    "OR (queue_state='claimed' AND lease_until <= ?) "
+                    "ORDER BY updated_at ASC, run_id ASC LIMIT 1",
+                    (ts,),
+                ).fetchone()
+            if row is None:
+                return None
+            previous_owner = row["owner_id"]
+            takeover = row["queue_state"] == "claimed"
+            new_epoch = int(row["epoch"]) + 1
+            deadline = ts + float(ttl_seconds)
+            con.execute(
+                "UPDATE run_leases SET queue_state='claimed', owner_id=?, epoch=?, lease_until=?, heartbeat_at=?, updated_at=? "
+                "WHERE run_id=?",
+                (owner_id, new_epoch, deadline, now, now, row["run_id"]),
+            )
+            payload = {
+                "owner_id": owner_id,
+                "epoch": new_epoch,
+                "previous_owner": previous_owner,
+                "takeover": takeover,
+                "action": row["action"],
+                "ttl_seconds": float(ttl_seconds),
+            }
+            con.execute(
+                "INSERT INTO events(run_id, kind, created_at, payload) VALUES (?, 'lease_claimed', ?, ?)",
+                (row["run_id"], now, _dump(payload)),
+            )
+        return {
+            "run_id": row["run_id"],
+            "owner_id": owner_id,
+            "epoch": new_epoch,
+            "action": row["action"],
+            "lease_until": deadline,
+            "previous_owner": previous_owner,
+            "takeover": takeover,
+        }
+
+    def heartbeat_lease(
+        self,
+        run_id: str,
+        owner_id: str,
+        epoch: int,
+        ttl_seconds: float = 15.0,
+        now_ts: float | None = None,
+    ) -> dict:
+        """续租当前任务；若已被新世代 Worker 接管则立即抛 StaleEpochError。"""
+        ts = time.time() if now_ts is None else float(now_ts)
+        now = _now()
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            self._verify_epoch_tx(con, run_id, epoch)
+            row = con.execute("SELECT * FROM run_leases WHERE run_id=?", (run_id,)).fetchone()
+            if row["owner_id"] != owner_id:
+                raise StaleEpochError("lease_owner_mismatch")
+            deadline = ts + float(ttl_seconds)
+            con.execute(
+                "UPDATE run_leases SET lease_until=?, heartbeat_at=?, updated_at=? WHERE run_id=?",
+                (deadline, now, now, run_id),
+            )
+        return {"run_id": run_id, "owner_id": owner_id, "epoch": epoch, "lease_until": deadline}
+
+    def release_lease(self, run_id: str, owner_id: str, epoch: int, final_state: str) -> None:
+        """结束本次租约；同样校验世代，防止过期 Worker 把已完成任务改回旧状态。"""
+        if final_state not in {"idle", "queued", "waiting_approval", "completed", "failed", "budget_exceeded"}:
+            raise ValueError("lease_final_state_invalid")
+        now = _now()
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            self._verify_epoch_tx(con, run_id, epoch)
+            row = con.execute("SELECT owner_id FROM run_leases WHERE run_id=?", (run_id,)).fetchone()
+            if row["owner_id"] != owner_id:
+                raise StaleEpochError("lease_owner_mismatch")
+            con.execute(
+                "UPDATE run_leases SET queue_state=?, owner_id=NULL, lease_until=NULL, updated_at=? WHERE run_id=?",
+                (final_state, now, run_id),
+            )
+
+    def get_lease(self, run_id: str) -> dict | None:
+        with self._connect() as con:
+            row = con.execute("SELECT * FROM run_leases WHERE run_id=?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_worker_node(
+        self,
+        worker_id: str,
+        pid: int,
+        host: str,
+        status: str = "idle",
+        active_run_id: str | None = None,
+        active_epoch: int | None = None,
+    ) -> None:
+        self._identifier(worker_id, "worker_id")
+        now = _now()
+        with self._connect() as con:
+            con.execute(
+                "INSERT INTO worker_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(worker_id) DO UPDATE SET "
+                "pid=excluded.pid, host=excluded.host, last_seen_at=excluded.last_seen_at, "
+                "active_run_id=excluded.active_run_id, active_epoch=excluded.active_epoch, status=excluded.status",
+                (worker_id, int(pid), host[:120], now, now, active_run_id, active_epoch, status[:40]),
+            )
+
+    def list_workers(self, limit: int = 32) -> list[dict]:
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT * FROM worker_nodes ORDER BY last_seen_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_run(self, run_id: str) -> dict | None:
         with self._connect() as con:
@@ -141,10 +355,12 @@ class Storage:
             rows = con.execute("SELECT body FROM runs ORDER BY created_at DESC LIMIT 200").fetchall()
         return [json.loads(row["body"]) for row in rows]
 
-    def save_run(self, run: dict) -> None:
+    def save_run(self, run: dict, expected_epoch: int | None = None) -> None:
         # JSON 整体保存，新增字段无需迁移。生产环境通常拆出可检索的状态列。
         run["updated_at"] = _now()
         with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            self._verify_epoch_tx(con, run["id"], expected_epoch)
             changed = con.execute("UPDATE runs SET body=? WHERE id=?", (_dump(run), run["id"]))
             if changed.rowcount != 1:
                 raise KeyError("run_not_found")
@@ -188,23 +404,101 @@ class Storage:
         return {row["key"]: json.loads(row["value"]) for row in rows}
 
     def create_proposal(
-        self, run_id: str, path: str, old_content: str, new_content: str, operation_id: str | None = None
+        self,
+        run_id: str,
+        path: str,
+        old_content: str,
+        new_content: str,
+        operation_id: str | None = None,
+        expected_epoch: int | None = None,
+        base_commit: str | None = None,
     ) -> dict:
         """同一工具调用只产生一个提案，弥合创建提案后、保存工具结果前的崩溃窗口。
 
         这只是本地数据库中提案创建的幂等键。文件写入仍需独立审批和 CAS；
         不能把它推广为任意外部系统副作用的 exactly-once 保证。
         """
+        return self.create_changeset_proposal(
+            run_id=run_id,
+            files=[
+                {
+                    "path": path,
+                    "old_content": old_content,
+                    "new_content": new_content,
+                }
+            ],
+            summary="",
+            base_commit=base_commit,
+            operation_id=operation_id,
+            expected_epoch=expected_epoch,
+        )
+
+    def create_changeset_proposal(
+        self,
+        run_id: str,
+        files: list[dict[str, str]],
+        summary: str = "",
+        base_commit: str | None = None,
+        operation_id: str | None = None,
+        expected_epoch: int | None = None,
+    ) -> dict:
+        """支持单文件或多文件整组原子提案，绑定每个目标文件的原文 SHA-256 与 Git 基线。"""
+        if not files or len(files) > 8:
+            raise ValueError("changeset_files_count_invalid")
         if operation_id is not None:
             self._identifier(operation_id, "operation_id")
+        normalized_files = []
+        seen_paths: set[str] = set()
+        for entry in files:
+            path = entry["path"]
+            if path in seen_paths:
+                raise ValueError("duplicate_proposal_path")
+            seen_paths.add(path)
+            old_c = entry["old_content"]
+            new_c = entry["new_content"]
+            normalized_files.append(
+                {
+                    "path": path,
+                    "old_content": old_c,
+                    "new_content": new_c,
+                    "old_sha256": digest(old_c),
+                    "new_sha256": digest(new_c),
+                }
+            )
+        single = len(normalized_files) == 1
+        old_sha = (
+            normalized_files[0]["old_sha256"]
+            if single
+            else digest(
+                canonical_json([{"path": f["path"], "sha256": f["old_sha256"]} for f in normalized_files])
+            )
+        )
+        new_sha = (
+            normalized_files[0]["new_sha256"]
+            if single
+            else digest(
+                canonical_json([{"path": f["path"], "sha256": f["new_sha256"]} for f in normalized_files])
+            )
+        )
         proposal = {
             "id": uuid.uuid4().hex,
             "run_id": run_id,
-            "path": path,
-            "old_content": old_content,
-            "new_content": new_content,
-            "old_sha256": digest(old_content),
-            "new_sha256": digest(new_content),
+            "kind": "single_file" if single else "changeset",
+            "summary": summary[:300],
+            "base_commit": base_commit,
+            "paths": [f["path"] for f in normalized_files],
+            "files": normalized_files,
+            "path": normalized_files[0]["path"]
+            if single
+            else ", ".join(f["path"] for f in normalized_files),
+            "old_content": normalized_files[0]["old_content"]
+            if single
+            else "\n".join(f"=== {f['path']} ===\n{f['old_content']}" for f in normalized_files),
+            "new_content": normalized_files[0]["new_content"]
+            if single
+            else "\n".join(f"=== {f['path']} ===\n{f['new_content']}" for f in normalized_files),
+            "old_sha256": old_sha,
+            "new_sha256": new_sha,
             "status": "pending",
             "applied": False,
             "created_at": _now(),
@@ -212,6 +506,7 @@ class Storage:
         }
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            self._verify_epoch_tx(con, run_id, expected_epoch)
             if operation_id is not None:
                 existing = con.execute(
                     "SELECT body FROM proposals WHERE run_id=? AND operation_id=?", (run_id, operation_id)
@@ -264,13 +559,14 @@ class Storage:
             con.execute("UPDATE proposals SET body=? WHERE id=?", (_dump(proposal), proposal_id))
         return proposal
 
-    def mark_proposal_applied(self, proposal_id: str) -> dict:
+    def mark_proposal_applied(self, proposal_id: str, expected_epoch: int | None = None) -> dict:
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT body FROM proposals WHERE id=?", (proposal_id,)).fetchone()
             if row is None:
                 raise KeyError("proposal_not_found")
             proposal = json.loads(row["body"])
+            self._verify_epoch_tx(con, proposal["run_id"], expected_epoch)
             if proposal["status"] != "approved":
                 raise ValueError("approval_required")
             proposal["applied"] = True
@@ -283,7 +579,9 @@ class Storage:
         if not isinstance(value, str) or not value.strip() or len(value) > 128:
             raise ValueError(f"{field}_invalid")
 
-    def schedule_call(self, run_id: str, call_id: str, name: str, arguments: dict) -> dict:
+    def schedule_call(
+        self, run_id: str, call_id: str, name: str, arguments: dict, expected_epoch: int | None = None
+    ) -> dict:
         """先记录调用意图。相同 ID 只接受相同工具与规范化参数，绝不靠名称猜测恢复。"""
         self._identifier(call_id, "call_id")
         self._identifier(name, "tool_name")
@@ -310,6 +608,7 @@ class Storage:
         }
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            self._verify_epoch_tx(con, run_id, expected_epoch)
             row = con.execute(
                 "SELECT body FROM tool_calls WHERE run_id=? AND call_id=?", (run_id, call_id)
             ).fetchone()
@@ -367,7 +666,7 @@ class Storage:
             raise KeyError("tool_call_not_found")
         return json.loads(row["body"])
 
-    def start_call(self, run_id: str, call_id: str) -> dict:
+    def start_call(self, run_id: str, call_id: str, expected_epoch: int | None = None) -> dict:
         """明确开始一次尝试。是否允许重放由 Runtime 的工具恢复策略决定。
 
         running 只说明数据库里没有完成记录，不能证明上个进程没产生副作用。
@@ -376,6 +675,7 @@ class Storage:
         """
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            self._verify_epoch_tx(con, run_id, expected_epoch)
             record = self._require_call(con, run_id, call_id)
             if record["status"] in {"succeeded", "waiting_approval"}:
                 raise ValueError("tool_call_already_finished")
@@ -401,7 +701,14 @@ class Storage:
             self._save_call(con, record)
         return record
 
-    def finish_call(self, run_id: str, call_id: str, result: Any, status: str | None = None) -> dict:
+    def finish_call(
+        self,
+        run_id: str,
+        call_id: str,
+        result: Any,
+        status: str | None = None,
+        expected_epoch: int | None = None,
+    ) -> dict:
         """完整结果先落盘，再由 Runtime 生成短投影；空字典/列表/False 都是真实结果。"""
         if status is None:
             if isinstance(result, dict) and result.get("requires_approval"):
@@ -415,6 +722,7 @@ class Storage:
         fingerprint = digest(canonical_json(result))
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            self._verify_epoch_tx(con, run_id, expected_epoch)
             record = self._require_call(con, run_id, call_id)
             if record["status"] not in {"scheduled", "running"}:
                 if record["status"] == status and record["result_sha256"] == fingerprint:

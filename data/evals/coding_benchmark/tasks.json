@@ -1,0 +1,42 @@
+[
+  {
+    "id": "coupon_settlement",
+    "title": "跨文件优惠封顶与结算总额契约修复",
+    "difficulty": "medium",
+    "multi_file": true,
+    "repo_dir": "repos/coupon_settlement",
+    "prompt": "请检查当前仓库中的订单优惠结算逻辑（models.py、discounts.py、checkout.py），修复跨文件契约缺陷使全部单元测试通过，并在容器沙箱中验证结果。"
+  },
+  {
+    "id": "cursor_pagination",
+    "title": "游标分页起始偏移与 has_more 边界修复",
+    "difficulty": "easy",
+    "multi_file": false,
+    "repo_dir": "repos/cursor_pagination",
+    "prompt": "paginator.py 中的 paginate_records 在传入 after_id 以及剩余条数恰好等于 limit 时行为错误。请定位并修复缺陷，并用 sandbox_test 验证通过。"
+  },
+  {
+    "id": "retry_policy",
+    "title": "HTTP 指数退避状态码过滤与上限截断修复",
+    "difficulty": "easy",
+    "multi_file": false,
+    "repo_dir": "repos/retry_policy",
+    "prompt": "http_retry.py 的 plan_retry 错误地对 4xx 客户端错误发起重试，且指数退避指数和 max_ms 截断计算有误。请修复并通过全部测试。"
+  },
+  {
+    "id": "window_merger",
+    "title": "跨模块时间窗口排序与相邻区间合并修复",
+    "difficulty": "medium",
+    "multi_file": true,
+    "repo_dir": "repos/window_merger",
+    "prompt": "intervals.py 与 merger.py 在无序输入及端点相邻（如 [1,5] 与 [5,8]）的时间窗口合并上出错。请协调修复两个文件并通过容器测试。"
+  },
+  {
+    "id": "ttl_lru_cache",
+    "title": "带过期时间的 LRU 缓存访问刷新与到期边界修复",
+    "difficulty": "medium",
+    "multi_file": false,
+    "repo_dir": "repos/ttl_lru_cache",
+    "prompt": "cache.py 中的 TtlLruCache 在命中读取时未刷新最近使用顺序，且 now == expires_at 时的到期判定有误。请修复并通过全部测试。"
+  }
+]

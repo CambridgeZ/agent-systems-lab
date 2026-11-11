@@ -251,7 +251,9 @@ async def main():
     }
     try:
         with tempfile.TemporaryDirectory(prefix="agent-lab-sandbox-") as temporary:
-            folder = Path(temporary)
+            # macOS 临时目录位于 /var -> /private/var 系统符号链接之下；先规范化测试宿主根，
+            # 让 SandboxRunner 仍严格拒绝仓库内部的符号链接与硬链接。
+            folder = Path(temporary).resolve()
             workspace = fresh_workspace(folder, "repo")
             storage = Storage(folder / "state.db")
             engine = AgentRuntime(storage, workspace, ROOT / "data/knowledge", ROOT / "skills")

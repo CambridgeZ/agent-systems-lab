@@ -55,9 +55,24 @@ uv run --no-sync agent-lab --state .agent-lab/learning approve RUN_ID PROPOSAL_I
 
 ```bash
 uv run --no-sync agent-lab demo --auto-approve
+
+# 体验基于真实 Git worktree 的跨文件（checkout.py + discounts.py）原子补丁、容器套件验收与自动提交
+uv run --no-sync agent-lab demo --template multi_file --auto-approve
 ```
 
 这个参数仅用于 `demo` 子命令的内置示例，不是给真实模型开启通用自动审批。面试展示审批机制时仍建议手动操作。
+
+若想演示生产形态的 **API 控制面与持久队列 Worker 分离**（含租约心跳、过期接管与单调递增 `epoch` 护栏），可在两个终端分别运行：
+
+```bash
+# 终端 1：启动 Web 工作台，将任务写入持久队列
+uv run --no-sync agent-lab serve --dispatch queue
+
+# 终端 2：启动独立 LeaseWorker 领取任务并定期续租
+uv run --no-sync agent-lab worker --worker-id local-worker-1
+```
+
+随后在工作台顶栏即可看到在线 Worker、当前任务的 `epoch` 世代号、RepoMap 符号摘要与带来源校验的结构化工作记忆。
 
 ## 3. 比较三种模式
 
@@ -150,7 +165,7 @@ docker pull python:3.12-slim
 
 重新运行并批准内置任务后检查 `sandbox_test`。工具仅使用本地镜像，限制网络、挂载、权限、资源与时间，并校验验收测试版本。镜像下载发生在这个手动准备步骤，不由模型工具自动执行。
 
-本机 Docker 守护进程未启动，网页会显示 `sandbox_unavailable`。GitHub Actions 已在 Linux 上完成真实容器验证：原始业务测试失败，审批后的修复通过。单元测试的命令参数检查与真实容器结果分别记录，证据见 [验证记录](validation.md)。
+若本机 Docker 未启动，网页会明确显示 `sandbox_unavailable`，绝不退回宿主机执行待测代码；启动 Docker Desktop 并拉取 `python:3.12-slim` 后，本机与 GitHub Actions Linux 环境均会真实运行容器测试并在通过后对 Git worktree 执行验证门控提交。证据见 [验证记录](validation.md)。
 
 ## 7. MCP 与评测
 
@@ -167,6 +182,9 @@ uv run --no-sync python -m agent_lab.mcp_server --workspace data/sample_repo
 ```bash
 uv run --no-sync pytest -q
 uv run --no-sync agent-lab eval --report reports/eval.json
+
+# 在已准备 python:3.12-slim 镜像的环境下运行 5 任务真实仓库编码基准流水线验证
+uv run --no-sync agent-lab model-eval --provider reference --report reports/model-eval.json
 ```
 
 评测为每个任务复制干净工作区，检查审批前后文件、拒绝、恢复、版本冲突、重复审批、预算和不同模式。算术 grader 通过白名单 AST 验证表达式，不导入生成代码，不等于运行整个函数的单元测试。

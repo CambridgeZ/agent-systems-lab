@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-11T08:48:10.040072+00:00",
+  "provider": "reference",
+  "model": null,
+  "evaluation_scope": "benchmark_harness_verification_only",
+  "honesty_note": "当前使用内置确定性 reference 执行器验证评测流水线、Git worktree 与测试驱动修复闭环；该分数不代表任何 LLM 的真实编码能力。",
+  "environment": {
+    "python": "3.11.5",
+    "platform": "macOS-26.7.2-arm64-arm-64bit",
+    "max_steps": 16,
+    "max_tokens": 40000,
+    "max_repair_rounds": 2,
+    "baseline_verified_in_docker": true
+  },
+  "summary": {
+    "tasks": 5,
+    "trials_per_task": 1,
+    "total_runs": 5,
+    "valid_runs": 5,
+    "passed_runs": 5,
+    "model_failures": 0,
+    "infrastructure_failures": 0,
+    "pass_rate_valid": 1.0,
+    "pass_at_1_by_task": {
+      "coupon_settlement": 1.0,
+      "cursor_pagination": 1.0,
+      "retry_policy": 1.0,
+      "window_merger": 1.0,
+      "ttl_lru_cache": 1.0
+    },
+    "multi_file_passed": 2,
+    "runs_repaired_after_failure": 1,
+    "total_repair_rounds_used": 1,
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
+    "avg_duration_ms": 2137.75
+  },
+  "results": [
+    {
+      "task_id": "coupon_settlement",
+      "title": "跨文件优惠封顶与结算总额契约修复",
+      "multi_file": true,
+      "trial": 1,
+      "outcome": "passed",
+      "failure_category": null,
+      "run_status": "completed",
+      "run_error": null,
+      "verification_status": "passed",
+      "tests_executed": true,
+      "expected_tests": 5,
+      "repair_rounds_used": 0,
+      "steps": 5,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "baseline_check": {
+        "checked": true,
+        "code": "tests_failed"
+      },
+      "base_commit": "c450ab822c161fb24099df5cb524afdd3c69279a",
+      "committed_sha": "4cd37ffca8c793299528e45d54c3ea3fe1565e83",
+      "changed_files": [
+        "checkout.py",
+        "discounts.py"
+      ],
+      "diff_chars": 1195,
+      "duration_ms": 2010.83
+    },
+    {
+      "task_id": "cursor_pagination",
+      "title": "游标分页起始偏移与 has_more 边界修复",
+      "multi_file": false,
+      "trial": 1,
+      "outcome": "passed",
+      "failure_category": null,
+      "run_status": "completed",
+      "run_error": null,
+      "verification_status": "passed",
+      "tests_executed": true,
+      "expected_tests": 4,
+      "repair_rounds_used": 0,
+      "steps": 5,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "baseline_check": {
+        "checked": true,
+        "code": "tests_failed"
+      },
+      "base_commit": "110c8d664c56568d25d049c67f91b50a176dd8c5",
+      "committed_sha": "7bb296940e3384fea0c046875daefcbae3ca508a",
+      "changed_files": [
+        "paginator.py"
+      ],
+      "diff_chars": 744,
+      "duration_ms": 2341.44
+    },
+    {
+      "task_id": "retry_policy",
+      "title": "HTTP 指数退避状态码过滤与上限截断修复",
+      "multi_file": false,
+      "trial": 1,
+      "outcome": "passed",
+      "failure_category": null,
+      "run_status": "completed",
+      "run_error": null,
+      "verification_status": "passed",
+      "tests_executed": true,
+      "expected_tests": 4,
+      "repair_rounds_used": 1,
+      "steps": 7,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "baseline_check": {
+        "checked": true,
+        "code": "tests_failed"
+      },
+      "base_commit": "5ca12b564715013c248de678164355783688b8e2",
+      "committed_sha": "c9c4af5defdd6552425cadde860d02ba9393ef21",
+      "changed_files": [
+        "http_retry.py"
+      ],
+      "diff_chars": 634,
+      "duration_ms": 3140.88
+    },
+    {
+      "task_id": "window_merger",
+      "title": "跨模块时间窗口排序与相邻区间合并修复",
+      "multi_file": true,
+      "trial": 1,
+      "outcome": "passed",
+      "failure_category": null,
+      "run_status": "completed",
+      "run_error": null,
+      "verification_status": "passed",
+      "tests_executed": true,
+      "expected_tests": 4,
+      "repair_rounds_used": 0,
+      "steps": 5,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "baseline_check": {
+        "checked": true,
+        "code": "tests_failed"
+      },
+      "base_commit": "fedc63be2bc2e80d8a676cce2e05cf26edafa28b",
+      "committed_sha": "01b2d0a79476c451555984b32f94c5bbfeb556ed",
+      "changed_files": [
+        "intervals.py",
+        "merger.py"
+      ],
+      "diff_chars": 930,
+      "duration_ms": 1699.5
+    },
+    {
+      "task_id": "ttl_lru_cache",
+      "title": "带过期时间的 LRU 缓存访问刷新与到期边界修复",
+      "multi_file": false,
+      "trial": 1,
+      "outcome": "passed",
+      "failure_category": null,
+      "run_status": "completed",
+      "run_error": null,
+      "verification_status": "passed",
+      "tests_executed": true,
+      "expected_tests": 4,
+      "repair_rounds_used": 0,
+      "steps": 8,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "baseline_check": {
+        "checked": true,
+        "code": "tests_failed"
+      },
+      "base_commit": "543a41436a634646853fdc44afad793655aa973c",
+      "committed_sha": "5c2c1ad15152e87ce18000b32ef2309362445d77",
+      "changed_files": [
+        "cache.py"
+      ],
+      "diff_chars": 854,
+      "duration_ms": 1496.11
+    }
+  ]
+}

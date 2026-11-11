@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import asdict, dataclass
 import errno
 import hashlib
@@ -31,6 +32,24 @@ import json, sys, unittest
 sys.path.insert(0, "/workspace")
 suite = unittest.defaultTestLoader.discover("/workspace/tests", pattern="test_pricing.py")
 expected = 4
+if suite.countTestCases() != expected:
+    receipt = {"tests_run": 0, "expected": expected, "failures": 0, "errors": 0,
+               "skipped": 0, "successful": False}
+else:
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    receipt = {"tests_run": result.testsRun, "expected": expected,
+               "failures": len(result.failures), "errors": len(result.errors),
+               "skipped": len(result.skipped), "successful": result.wasSuccessful()}
+print("\n" + __RECEIPT_MARKER__ + json.dumps(receipt, sort_keys=True), flush=True)
+sys.exit(0 if receipt["tests_run"] == expected and not receipt["skipped"]
+         and receipt["successful"] else 1)
+""".strip()
+
+_SUITE_DRIVER = r"""
+import json, sys, unittest
+sys.path.insert(0, "/workspace")
+suite = unittest.defaultTestLoader.discover("/workspace/tests", pattern=__TEST_PATTERN__)
+expected = __EXPECTED_TESTS__
 if suite.countTestCases() != expected:
     receipt = {"tests_run": 0, "expected": expected, "failures": 0, "errors": 0,
                "skipped": 0, "successful": False}
@@ -69,6 +88,37 @@ def _json(value: Any) -> str:
 
 def _sha(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def discover_test_oracles(workspace: Path) -> tuple[dict[str, str], int]:
+    """静态解析受保护的 tests 目录，提取每个测试文件的 SHA-256 与预期 unittest 用例数。
+
+    在宿主端仅做 AST 分析，绝不 import 或执行待测仓库代码。
+    """
+    root = Path(workspace).resolve()
+    tests_dir = root / "tests"
+    if not tests_dir.is_dir() or tests_dir.is_symlink():
+        raise ValueError("仓库缺少真实 tests 目录")
+    oracles: dict[str, str] = {}
+    expected_count = 0
+    for path in sorted(tests_dir.rglob("*.py")):
+        if path.is_symlink() or path.name.startswith("."):
+            continue
+        rel = path.relative_to(root).as_posix()
+        raw = path.read_bytes()
+        oracles[rel] = _sha(raw)
+        if path.name.startswith("test") and path.name.endswith(".py"):
+            tree = ast.parse(raw.decode("utf-8"), filename=rel)
+            for node in tree.body:
+                if isinstance(node, ast.ClassDef):
+                    for item in node.body:
+                        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith(
+                            "test"
+                        ):
+                            expected_count += 1
+    if not oracles or expected_count < 1:
+        raise ValueError("未在 tests/ 中发现可静态计数的 unittest 测试方法")
+    return oracles, expected_count
 
 
 @dataclass(frozen=True)
@@ -262,6 +312,114 @@ class SandboxRunner:
             "snapshot_total_bytes": total,
         }
 
+    def _snapshot_suite(
+        self, workspace: Path, destination: Path, test_oracles: dict[str, str]
+    ) -> dict:
+        if not test_oracles or any(
+            not rel.startswith("tests/")
+            or not rel.endswith(".py")
+            or ".." in Path(rel).parts
+            or not isinstance(digest_hex, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest_hex)
+            for rel, digest_hex in test_oracles.items()
+        ):
+            raise _SandboxError("test_oracle_modified", "测试套件摘要配置无效")
+        destination.mkdir(mode=0o755)
+        destination.chmod(0o755)
+        manifest, total, entries = [], 0, 0
+
+        def visit(directory_fd: int, relative: Path, depth: int):
+            nonlocal total, entries
+            if depth > self.policy.max_depth:
+                raise _SandboxError("sandbox_snapshot_limit", "工作区目录深度超过限制")
+            with os.scandir(directory_fd) as iterator:
+                for entry in iterator:
+                    entries += 1
+                    if entries > self.policy.max_entries:
+                        raise _SandboxError("sandbox_snapshot_limit", "工作区目录项超过限制")
+                    if entry.name.startswith("."):
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                    child = relative / entry.name
+                    if stat.S_ISLNK(info.st_mode):
+                        raise _SandboxError("unsafe_workspace", "工作区不允许符号链接")
+                    if stat.S_ISDIR(info.st_mode):
+                        child_fd = self._open_directory(entry.name, directory_fd)
+                        try:
+                            target = destination / child
+                            target.mkdir(mode=0o755)
+                            target.chmod(0o755)
+                            visit(child_fd, child, depth + 1)
+                        finally:
+                            os.close(child_fd)
+                        continue
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise _SandboxError("unsafe_workspace", "工作区不允许硬链接、FIFO 或其他特殊文件")
+                    if not entry.name.endswith(".py") or entry.name.casefold() in _SENSITIVE_NAMES:
+                        continue
+                    if len(manifest) >= self.policy.max_files or info.st_size > self.policy.max_file_bytes:
+                        raise _SandboxError("sandbox_snapshot_limit", "Python 文件数量或单文件大小超过限制")
+                    descriptor = os.open(
+                        entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd
+                    )
+                    try:
+                        before = os.fstat(descriptor)
+                        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                            raise _SandboxError("unsafe_workspace", "复制时源文件已变为链接或特殊文件")
+                        content = bytearray()
+                        while len(content) <= self.policy.max_file_bytes:
+                            part = os.read(
+                                descriptor, min(65_536, self.policy.max_file_bytes + 1 - len(content))
+                            )
+                            if not part:
+                                break
+                            content.extend(part)
+                        after = os.fstat(descriptor)
+                        sig_before = (
+                            before.st_dev,
+                            before.st_ino,
+                            before.st_size,
+                            before.st_mtime_ns,
+                            before.st_ctime_ns,
+                            before.st_nlink,
+                        )
+                        sig_after = (
+                            after.st_dev,
+                            after.st_ino,
+                            after.st_size,
+                            after.st_mtime_ns,
+                            after.st_ctime_ns,
+                            after.st_nlink,
+                        )
+                        if sig_before != sig_after:
+                            raise _SandboxError("unsafe_workspace", "源文件在快照复制期间发生变化")
+                    finally:
+                        os.close(descriptor)
+                    total += len(content)
+                    if len(content) > self.policy.max_file_bytes or total > self.policy.max_total_bytes:
+                        raise _SandboxError("sandbox_snapshot_limit", "Python 快照总大小超过限制")
+                    target = destination / child
+                    target.write_bytes(content)
+                    target.chmod(0o444)
+                    manifest.append(
+                        {"path": child.as_posix(), "bytes": len(content), "sha256": _sha(content)}
+                    )
+
+        root_fd = self._open_root(workspace)
+        try:
+            visit(root_fd, Path(), 0)
+        finally:
+            os.close(root_fd)
+        copied_tests = {item["path"]: item["sha256"] for item in manifest if item["path"].startswith("tests/")}
+        if copied_tests != test_oracles:
+            raise _SandboxError("test_oracle_modified", "快照中的受保护测试文件集与基线摘要不一致")
+        manifest.sort(key=lambda item: item["path"])
+        return {
+            "snapshot_sha256": _sha(_json(manifest).encode()),
+            "snapshot_file_count": len(manifest),
+            "snapshot_total_bytes": total,
+        }
+
     @staticmethod
     def _capture(command: list[str], timeout: float, limit: int) -> _CommandResult:
         """最多实际读取 limit+1 字节；超限立即杀 CLI，不把无限输出写到磁盘。"""
@@ -318,7 +476,9 @@ class SandboxRunner:
         return _CommandResult(process.returncode, bytes(output[:limit]), timed_out, output_limited, error)
 
     @staticmethod
-    def _receipt(output: str, marker: str, returncode: int | None) -> dict | None:
+    def _receipt(
+        output: str, marker: str, returncode: int | None, expected_tests: int = 4
+    ) -> dict | None:
         lines = [line[len(marker) :] for line in output.splitlines() if line.startswith(marker)]
         if len(lines) != 1:
             return None
@@ -333,7 +493,11 @@ class SandboxRunner:
             return None
         if type(receipt.get("successful")) is not bool:
             return None
-        if receipt["tests_run"] != 4 or receipt["expected"] != 4 or receipt["skipped"] != 0:
+        if (
+            receipt["tests_run"] != expected_tests
+            or receipt["expected"] != expected_tests
+            or receipt["skipped"] != 0
+        ):
             return None
         if receipt["failures"] + receipt["errors"] > receipt["tests_run"]:
             return None
@@ -341,6 +505,169 @@ class SandboxRunner:
         if receipt["successful"] != passed or returncode != (0 if passed else 1):
             return None
         return receipt
+
+    def run_suite(
+        self,
+        workspace: Path,
+        test_oracles: dict[str, str],
+        expected_tests: int,
+        pattern: str = "test*.py",
+    ) -> dict:
+        """运行多文件或通用测试套件：校验全部受保护测试文件摘要与预期测试数回执。"""
+        if type(expected_tests) is not int or not 1 <= expected_tests <= 200:
+            raise ValueError("expected_tests 必须是 1—200 之间的整数")
+        if not re.fullmatch(r"[A-Za-z0-9_.*-]+", pattern):
+            raise ValueError("测试文件匹配模式不合法")
+        oracle_bundle_sha = _sha(_json(test_oracles).encode())
+        audit = {
+            **self.policy.audit(),
+            "expected_tests": expected_tests,
+            "test_pattern": pattern,
+            "driver_sha256": _sha(_SUITE_DRIVER.encode()),
+        }
+        policy_hash = _sha(_json(audit).encode())
+        result = {
+            "ok": False,
+            "code": "sandbox_unavailable",
+            "tests_executed": False,
+            "output": "",
+            "image_id": None,
+            "image_sha256": None,
+            "snapshot_sha256": None,
+            "policy_sha256": policy_hash,
+            "oracle_sha256": oracle_bundle_sha,
+            "cleanup_attempted": False,
+            "cleanup_verified": True,
+            "cleanup_error": None,
+            "isolation": "docker_readonly_snapshot_network_none",
+        }
+        try:
+            with tempfile.TemporaryDirectory(prefix="agent-lab-sandbox-") as temporary:
+                snapshot = Path(temporary).resolve() / "repo"
+                result.update(self._snapshot_suite(Path(workspace), snapshot, test_oracles))
+                docker = shutil.which("docker")
+                if not docker:
+                    result["error"] = "未安装 Docker，未执行运行时测试。"
+                    return result
+                inspected = self._capture(
+                    [docker, "image", "inspect", "--format", "{{.Id}}", self.policy.image], 5, 256
+                )
+                if inspected.returncode != 0 and not (
+                    inspected.timed_out or inspected.output_limited or inspected.error
+                ):
+                    # Docker Desktop containerd 镜像存储在多架构索引上可能令 image inspect 返回 1，
+                    # 此时回退到 docker image ls --no-trunc 读取固定 64 位 sha256 镜像摘要。
+                    inspected = self._capture(
+                        [docker, "image", "ls", "--format", "{{.ID}}", "--no-trunc", self.policy.image],
+                        5,
+                        256,
+                    )
+                image_id = inspected.output.decode("ascii", errors="replace").strip()
+                if (
+                    inspected.returncode != 0
+                    or inspected.timed_out
+                    or inspected.output_limited
+                    or inspected.error
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+                ):
+                    result["error"] = "Docker 不可用或本地镜像 ID 无法验证；不会自动拉取镜像。"
+                    return result
+                result.update(image_id=image_id, image_sha256=image_id.removeprefix("sha256:"))
+                if "," in str(snapshot):
+                    raise _SandboxError("unsafe_workspace", "临时快照路径不能包含 Docker mount 分隔符")
+                name = "agent-lab-" + uuid.uuid4().hex
+                marker = "AGENT_LAB_RECEIPT_" + uuid.uuid4().hex + ":"
+                driver = (
+                    _SUITE_DRIVER.replace("__RECEIPT_MARKER__", repr(marker))
+                    .replace("__TEST_PATTERN__", repr(pattern))
+                    .replace("__EXPECTED_TESTS__", str(expected_tests))
+                )
+                command = [
+                    docker,
+                    "run",
+                    "--name",
+                    name,
+                    *_LIMIT_FLAGS,
+                    "--tmpfs",
+                    "/tmp:rw,noexec,nosuid,size=16m",
+                    "--mount",
+                    f"type=bind,source={snapshot},target=/workspace,readonly",
+                    "--workdir",
+                    "/workspace",
+                    "--env",
+                    "PYTHONDONTWRITEBYTECODE=1",
+                    "--env",
+                    "PYTHONNOUSERSITE=1",
+                    image_id,
+                    "python",
+                    "-I",
+                    "-B",
+                    "-c",
+                    driver,
+                ]
+                try:
+                    result["tests_executed"] = None
+                    execution = self._capture(
+                        command, self.policy.timeout_seconds, self.policy.output_limit_bytes
+                    )
+                    display = execution.output.decode("utf-8", errors="replace").encode("utf-8")
+                    result.update(
+                        output=display[: self.policy.output_limit_bytes].decode("utf-8", errors="ignore"),
+                        output_truncated=execution.output_limited,
+                        exit_code=execution.returncode,
+                    )
+                    if execution.timed_out:
+                        result.update(code="sandbox_timeout", error="容器测试超过时间上限，已请求终止。")
+                    elif execution.output_limited:
+                        result.update(code="sandbox_output_limit", error="容器输出超过硬上限，已请求终止。")
+                    elif execution.error:
+                        result.update(code="sandbox_error", error=execution.error)
+                    else:
+                        receipt = self._receipt(
+                            result["output"], marker, execution.returncode, expected_tests=expected_tests
+                        )
+                        if receipt is None:
+                            result.update(
+                                code="sandbox_incomplete",
+                                error=f"缺少完整且一致的 {expected_tests} 项测试回执，不能判定通过。",
+                            )
+                        else:
+                            passed = receipt["successful"]
+                            result.update(
+                                ok=passed,
+                                code="passed" if passed else "tests_failed",
+                                tests_executed=True,
+                                test_summary=receipt,
+                            )
+                except OSError as exc:
+                    result.update(code="sandbox_error", error=type(exc).__name__, tests_executed=None)
+                finally:
+                    result["cleanup_attempted"] = True
+                    try:
+                        cleanup = self._capture([docker, "rm", "-f", name], 5, 2048)
+                        result["cleanup_verified"] = cleanup.returncode == 0 and not (
+                            cleanup.timed_out or cleanup.output_limited or cleanup.error
+                        )
+                        if not result["cleanup_verified"]:
+                            result["cleanup_error"] = cleanup.error or (
+                                "cleanup_timeout"
+                                if cleanup.timed_out
+                                else "cleanup_output_limit"
+                                if cleanup.output_limited
+                                else f"docker_rm_exit_{cleanup.returncode}"
+                            )
+                    except OSError as exc:
+                        result.update(cleanup_verified=False, cleanup_error=type(exc).__name__)
+                    if not result["cleanup_verified"]:
+                        if result["ok"]:
+                            result.update(execution_code=result["code"], code="sandbox_cleanup_failed")
+                        result["ok"] = False
+                return result
+        except _SandboxError as exc:
+            result.update(ok=False, code=exc.code, error=str(exc))
+        except (OSError, UnicodeError) as exc:
+            result.update(ok=False, code="sandbox_unavailable", error=type(exc).__name__)
+        return result
 
     def run(self, workspace: Path, oracle_sha256: str) -> dict:
         policy_hash = _sha(_json(self.policy.audit()).encode())
@@ -363,7 +690,7 @@ class SandboxRunner:
             # 父目录保持 0700；容器只看到 bind mount 后的 repo 根，repo 为 0755。
             # 不挂载原始 workspace，也不把主机环境变量传为 container --env。
             with tempfile.TemporaryDirectory(prefix="agent-lab-sandbox-") as temporary:
-                snapshot = Path(temporary) / "repo"
+                snapshot = Path(temporary).resolve() / "repo"
                 result.update(self._snapshot(Path(workspace), snapshot, oracle_sha256))
                 docker = shutil.which("docker")
                 if not docker:
@@ -372,6 +699,14 @@ class SandboxRunner:
                 inspected = self._capture(
                     [docker, "image", "inspect", "--format", "{{.Id}}", self.policy.image], 5, 256
                 )
+                if inspected.returncode != 0 and not (
+                    inspected.timed_out or inspected.output_limited or inspected.error
+                ):
+                    inspected = self._capture(
+                        [docker, "image", "ls", "--format", "{{.ID}}", "--no-trunc", self.policy.image],
+                        5,
+                        256,
+                    )
                 image_id = inspected.output.decode("ascii", errors="replace").strip()
                 if (
                     inspected.returncode != 0
