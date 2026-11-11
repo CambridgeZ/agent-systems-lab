@@ -1,0 +1,12 @@
+[
+  {"id":"approval_applies_fix","scenario":"approve","mode":"agent","goal":"先暂停等待审批，批准后只修改目标文件，并通过受限算术检查。"},
+  {"id":"rejection_keeps_file","scenario":"reject","mode":"agent","goal":"拒绝提案后原文件逐字保持不变。"},
+  {"id":"recover_waiting_approval","scenario":"recover","mode":"agent","goal":"重建运行时后恢复原提案与消息，审批可继续完成。"},
+  {"id":"recover_queued_run","scenario":"queued","mode":"agent","goal":"仅创建的 queued 任务可由新的运行时接管执行。"},
+  {"id":"step_budget_stops","scenario":"budget","mode":"agent","goal":"达到模型轮次上限后停止，不越过审批写文件。"},
+  {"id":"workflow_fix","scenario":"approve","mode":"workflow","goal":"固定检索阶段与后续补丁审批形成完整闭环。"},
+  {"id":"parallel_fix","scenario":"approve","mode":"parallel","goal":"只读 worker 并行完成后，由主流程提出并审批补丁。"},
+  {"id":"stale_patch_conflict","scenario":"conflict","mode":"agent","goal":"提案后文件发生变化，审批不能覆盖新内容。"},
+  {"id":"approval_idempotent","scenario":"idempotent","mode":"agent","goal":"重复批准已应用提案不重复修改文件。"},
+  {"id":"demo_scope_explicit","scenario":"unsupported","mode":"agent","goal":"离线脚本遇到其他任务时说明能力边界，且不修改仓库。"}
+]

@@ -1,0 +1,738 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-11T07:20:13.488123+00:00",
+  "provider": "deterministic_demo",
+  "evaluation_scope": "harness_regression_only",
+  "limitations": [
+    "不衡量真实模型推理/编码能力",
+    "公开合成示例，不是未见任务 benchmark",
+    "AST grader 只解释有效输入的算术返回表达式，不执行完整测试",
+    "Docker 测试是否执行取决于环境，不能由完成状态推断测试通过",
+    "重复脚本不估计真实模型随机性或 pass@k"
+  ],
+  "environment": {
+    "python": "3.11.5",
+    "platform": "macOS-26.7.2-arm64-arm-64bit",
+    "process_model": "single_process",
+    "approval_wait_included": false
+  },
+  "summary": {
+    "tasks": 10,
+    "trials_per_task": 1,
+    "total": 10,
+    "passed": 10,
+    "failed": 0,
+    "trial_success_fraction": 1.0,
+    "all_trials_passed_tasks": 10
+  },
+  "results": [
+    {
+      "task_id": "approval_applies_fix",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "补丁提案后暂停等待审批",
+          "passed": true
+        },
+        {
+          "name": "产生一个明确可审查提案",
+          "passed": true
+        },
+        {
+          "name": "批准后流程完成",
+          "passed": true
+        },
+        {
+          "name": "仅目标源文件被修改，测试未改动",
+          "passed": true
+        },
+        {
+          "name": "有效输入的受限算术返回值正确",
+          "passed": true
+        },
+        {
+          "name": "应用状态持久化",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "outcome_grader": {
+        "passed": true,
+        "cases": [
+          {
+            "subtotal": 200,
+            "discount_percent": 10,
+            "expected": 180,
+            "actual": 180.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 0,
+            "expected": 100,
+            "actual": 100.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 100,
+            "expected": 0,
+            "actual": 0.0,
+            "passed": true
+          },
+          {
+            "subtotal": 80,
+            "discount_percent": 25,
+            "expected": 60,
+            "actual": 60.0,
+            "passed": true
+          },
+          {
+            "subtotal": 99,
+            "discount_percent": 12.5,
+            "expected": 86.625,
+            "actual": 86.625,
+            "passed": true
+          }
+        ],
+        "method": "restricted_ast_arithmetic",
+        "tests_executed": false
+      },
+      "final_status": "completed",
+      "model_calls": 4,
+      "event_count": 26,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 202.9
+    },
+    {
+      "task_id": "rejection_keeps_file",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "补丁提案后暂停等待审批",
+          "passed": true
+        },
+        {
+          "name": "产生一个明确可审查提案",
+          "passed": true
+        },
+        {
+          "name": "拒绝后任务正常结束",
+          "passed": true
+        },
+        {
+          "name": "拒绝后整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "拒绝提案未被应用",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "final_status": "completed",
+      "model_calls": 3,
+      "event_count": 19,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 57.86
+    },
+    {
+      "task_id": "recover_waiting_approval",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "补丁提案后暂停等待审批",
+          "passed": true
+        },
+        {
+          "name": "产生一个明确可审查提案",
+          "passed": true
+        },
+        {
+          "name": "恢复不会绕过人工审批",
+          "passed": true
+        },
+        {
+          "name": "重建执行器仍保留原提案",
+          "passed": true
+        },
+        {
+          "name": "批准后流程完成",
+          "passed": true
+        },
+        {
+          "name": "仅目标源文件被修改，测试未改动",
+          "passed": true
+        },
+        {
+          "name": "有效输入的受限算术返回值正确",
+          "passed": true
+        },
+        {
+          "name": "应用状态持久化",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "outcome_grader": {
+        "passed": true,
+        "cases": [
+          {
+            "subtotal": 200,
+            "discount_percent": 10,
+            "expected": 180,
+            "actual": 180.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 0,
+            "expected": 100,
+            "actual": 100.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 100,
+            "expected": 0,
+            "actual": 0.0,
+            "passed": true
+          },
+          {
+            "subtotal": 80,
+            "discount_percent": 25,
+            "expected": 60,
+            "actual": 60.0,
+            "passed": true
+          },
+          {
+            "subtotal": 99,
+            "discount_percent": 12.5,
+            "expected": 86.625,
+            "actual": 86.625,
+            "passed": true
+          }
+        ],
+        "method": "restricted_ast_arithmetic",
+        "tests_executed": false
+      },
+      "final_status": "completed",
+      "model_calls": 4,
+      "event_count": 26,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 226.79
+    },
+    {
+      "task_id": "recover_queued_run",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "补丁提案后暂停等待审批",
+          "passed": true
+        },
+        {
+          "name": "产生一个明确可审查提案",
+          "passed": true
+        },
+        {
+          "name": "批准后流程完成",
+          "passed": true
+        },
+        {
+          "name": "仅目标源文件被修改，测试未改动",
+          "passed": true
+        },
+        {
+          "name": "有效输入的受限算术返回值正确",
+          "passed": true
+        },
+        {
+          "name": "应用状态持久化",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "outcome_grader": {
+        "passed": true,
+        "cases": [
+          {
+            "subtotal": 200,
+            "discount_percent": 10,
+            "expected": 180,
+            "actual": 180.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 0,
+            "expected": 100,
+            "actual": 100.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 100,
+            "expected": 0,
+            "actual": 0.0,
+            "passed": true
+          },
+          {
+            "subtotal": 80,
+            "discount_percent": 25,
+            "expected": 60,
+            "actual": 60.0,
+            "passed": true
+          },
+          {
+            "subtotal": 99,
+            "discount_percent": 12.5,
+            "expected": 86.625,
+            "actual": 86.625,
+            "passed": true
+          }
+        ],
+        "method": "restricted_ast_arithmetic",
+        "tests_executed": false
+      },
+      "final_status": "completed",
+      "model_calls": 4,
+      "event_count": 26,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 212.46
+    },
+    {
+      "task_id": "step_budget_stops",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "轮次预算终止执行",
+          "passed": true
+        },
+        {
+          "name": "模型调用次数不超过上限",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "final_status": "budget_exceeded",
+      "model_calls": 1,
+      "event_count": 9,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 32.76
+    },
+    {
+      "task_id": "workflow_fix",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "补丁提案后暂停等待审批",
+          "passed": true
+        },
+        {
+          "name": "产生一个明确可审查提案",
+          "passed": true
+        },
+        {
+          "name": "批准后流程完成",
+          "passed": true
+        },
+        {
+          "name": "仅目标源文件被修改，测试未改动",
+          "passed": true
+        },
+        {
+          "name": "有效输入的受限算术返回值正确",
+          "passed": true
+        },
+        {
+          "name": "应用状态持久化",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "outcome_grader": {
+        "passed": true,
+        "cases": [
+          {
+            "subtotal": 200,
+            "discount_percent": 10,
+            "expected": 180,
+            "actual": 180.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 0,
+            "expected": 100,
+            "actual": 100.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 100,
+            "expected": 0,
+            "actual": 0.0,
+            "passed": true
+          },
+          {
+            "subtotal": 80,
+            "discount_percent": 25,
+            "expected": 60,
+            "actual": 60.0,
+            "passed": true
+          },
+          {
+            "subtotal": 99,
+            "discount_percent": 12.5,
+            "expected": 86.625,
+            "actual": 86.625,
+            "passed": true
+          }
+        ],
+        "method": "restricted_ast_arithmetic",
+        "tests_executed": false
+      },
+      "final_status": "completed",
+      "model_calls": 4,
+      "event_count": 29,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 225.37
+    },
+    {
+      "task_id": "parallel_fix",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "补丁提案后暂停等待审批",
+          "passed": true
+        },
+        {
+          "name": "产生一个明确可审查提案",
+          "passed": true
+        },
+        {
+          "name": "批准后流程完成",
+          "passed": true
+        },
+        {
+          "name": "仅目标源文件被修改，测试未改动",
+          "passed": true
+        },
+        {
+          "name": "有效输入的受限算术返回值正确",
+          "passed": true
+        },
+        {
+          "name": "应用状态持久化",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        },
+        {
+          "name": "并行 worker 完成事件可见",
+          "passed": true
+        }
+      ],
+      "outcome_grader": {
+        "passed": true,
+        "cases": [
+          {
+            "subtotal": 200,
+            "discount_percent": 10,
+            "expected": 180,
+            "actual": 180.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 0,
+            "expected": 100,
+            "actual": 100.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 100,
+            "expected": 0,
+            "actual": 0.0,
+            "passed": true
+          },
+          {
+            "subtotal": 80,
+            "discount_percent": 25,
+            "expected": 60,
+            "actual": 60.0,
+            "passed": true
+          },
+          {
+            "subtotal": 99,
+            "discount_percent": 12.5,
+            "expected": 86.625,
+            "actual": 86.625,
+            "passed": true
+          }
+        ],
+        "method": "restricted_ast_arithmetic",
+        "tests_executed": false
+      },
+      "final_status": "completed",
+      "model_calls": 8,
+      "event_count": 39,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 227.29
+    },
+    {
+      "task_id": "stale_patch_conflict",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "补丁提案后暂停等待审批",
+          "passed": true
+        },
+        {
+          "name": "产生一个明确可审查提案",
+          "passed": true
+        },
+        {
+          "name": "过期补丁应用被拒绝",
+          "passed": true
+        },
+        {
+          "name": "冲突不覆盖外部更新",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "final_status": "failed",
+      "model_calls": 2,
+      "event_count": 16,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 61.91
+    },
+    {
+      "task_id": "approval_idempotent",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "补丁提案后暂停等待审批",
+          "passed": true
+        },
+        {
+          "name": "产生一个明确可审查提案",
+          "passed": true
+        },
+        {
+          "name": "批准后流程完成",
+          "passed": true
+        },
+        {
+          "name": "仅目标源文件被修改，测试未改动",
+          "passed": true
+        },
+        {
+          "name": "有效输入的受限算术返回值正确",
+          "passed": true
+        },
+        {
+          "name": "应用状态持久化",
+          "passed": true
+        },
+        {
+          "name": "重复批准保持相同结果",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "outcome_grader": {
+        "passed": true,
+        "cases": [
+          {
+            "subtotal": 200,
+            "discount_percent": 10,
+            "expected": 180,
+            "actual": 180.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 0,
+            "expected": 100,
+            "actual": 100.0,
+            "passed": true
+          },
+          {
+            "subtotal": 100,
+            "discount_percent": 100,
+            "expected": 0,
+            "actual": 0.0,
+            "passed": true
+          },
+          {
+            "subtotal": 80,
+            "discount_percent": 25,
+            "expected": 60,
+            "actual": 60.0,
+            "passed": true
+          },
+          {
+            "subtotal": 99,
+            "discount_percent": 12.5,
+            "expected": 86.625,
+            "actual": 86.625,
+            "passed": true
+          }
+        ],
+        "method": "restricted_ast_arithmetic",
+        "tests_executed": false
+      },
+      "final_status": "completed",
+      "model_calls": 4,
+      "event_count": 26,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 216.22
+    },
+    {
+      "task_id": "demo_scope_explicit",
+      "trial": 1,
+      "checks": [
+        {
+          "name": "审批前整个工作区保持原状",
+          "passed": true
+        },
+        {
+          "name": "未知 demo 任务正常结束",
+          "passed": true
+        },
+        {
+          "name": "回答标记离线脚本范围",
+          "passed": true
+        },
+        {
+          "name": "未产生无关补丁",
+          "passed": true
+        },
+        {
+          "name": "保留可检查执行轨迹",
+          "passed": true
+        }
+      ],
+      "final_status": "completed",
+      "model_calls": 1,
+      "event_count": 4,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "measurement": "demo_has_no_model_token_usage"
+      },
+      "passed": true,
+      "duration_ms": 22.0
+    }
+  ]
+}

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Agent Systems Lab · 代码开发工作台</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="/">a<span>sl</span><i>实验项目 / 01</i></a>
+      <div class="workspace-label">开发者学习工作台</div>
+      <div class="nav-active">◈ &nbsp; 代码任务</div>
+      <a class="nav" href="/docs" target="_blank">⌘ &nbsp; API 文档 ↗</a>
+      <div class="section-label">
+        最近的运行 <button id="refresh" title="刷新">↻</button>
+      </div>
+      <div id="runs" class="runs"><div class="muted">还没有运行记录</div></div>
+      <div class="sidebar-bottom">
+        <span class="dot"></span><span id="provider">正在连接服务</span
+        ><button id="auth" title="设置本次会话的 API Token">⚿</button>
+      </div>
+    </aside>
+    <main>
+      <header>
+        <div class="crumb">
+          Agent Systems Lab <span>/</span> Coding workspace
+        </div>
+        <div class="badge">可恢复 · 可观察 · 人工审批</div>
+      </header>
+      <div class="content">
+        <section class="intro">
+          <div class="eyebrow">从一处 BUG，理解完整的 AGENT 系统</div>
+          <h1>让代码变更，<em>有据可循。</em></h1>
+          <p>
+            阅读代码 → 检索知识 → 提出补丁 → 人工审批 → 验证结果。<br />在同一条执行轨迹里，观察模型、工具和执行框架如何配合。
+          </p>
+          <div class="capabilities">
+            <span>Tool use</span><span>RAG</span><span>Checkpoint</span
+            ><span>MCP</span><span>Evals</span>
+          </div>
+        </section>
+        <div class="layout">
+          <div class="primary">
+            <section class="card composer">
+              <div class="card-heading">
+                <span><b class="tiny-icon">↗</b> 新建开发任务</span
+                ><span class="small muted">独立示例仓库</span>
+              </div>
+              <label class="sr-only" for="prompt">任务描述</label
+              ><textarea id="prompt" rows="3">
+修复 pricing.py 的百分比折扣 bug，并验证修改。</textarea
+              >
+              <div class="composer-footer">
+                <label
+                  >执行模式
+                  <select id="mode">
+                    <option value="agent">Agent · 模型选择工具</option>
+                    <option value="workflow">Workflow · 固定检索前置</option>
+                    <option value="parallel">Parallel · 双 Worker 研究</option>
+                  </select></label
+                ><button class="button primary-button" id="start">
+                  开始运行 <span>↗</span>
+                </button>
+              </div>
+              <p class="hint" id="demo-note">
+                DEMO 为确定性内置场景；真实 Claude 接入由服务端配置。
+              </p>
+            </section>
+            <section class="card execution">
+              <div class="card-heading">
+                <span><b class="tiny-icon">◎</b> 执行轨迹</span
+                ><span id="status" class="status idle">等待任务</span>
+              </div>
+              <div class="metrics">
+                <div><label>模型轮次</label><strong id="steps">—</strong></div>
+                <div>
+                  <label>已计量 TOKENS</label><strong id="tokens">—</strong>
+                </div>
+                <div>
+                  <label>执行模式</label><strong id="mode-label">—</strong>
+                </div>
+              </div>
+              <div id="empty" class="empty">
+                <div class="empty-symbol">⌁</div>
+                <b>每一步，都留下证据</b>
+                <p>启动任务后，在这里查看工具参数、返回结果和审批记录。</p>
+              </div>
+              <div id="timeline" class="timeline"></div>
+              <button id="resume" class="button secondary hidden">
+                恢复任务 ↻
+              </button>
+            </section>
+            <section id="proposal-card" class="card hidden">
+              <div class="card-heading">
+                <span>▤ &nbsp; 待审批补丁</span
+                ><span class="status waiting_approval">等待你的决定</span>
+              </div>
+              <p class="hint">
+                批准后才写入任务副本。审批绑定原始文件摘要，防止覆盖期间发生的修改。
+              </p>
+              <div id="proposals"></div>
+            </section>
+            <section id="answer-card" class="card hidden">
+              <div class="card-heading"><span>✓ &nbsp; 运行结果</span></div>
+              <pre id="answer" class="answer"></pre>
+            </section>
+          </div>
+          <aside class="right-rail">
+            <section class="card mini">
+              <div class="eyebrow">系统构成</div>
+              <h3>一条完整的工程链路</h3>
+              <ol class="architecture">
+                <li>
+                  <span>01</span>
+                  <div>
+                    <b>模型决策</b><small>Claude API / 离线 Demo</small>
+                  </div>
+                </li>
+                <li>
+                  <span>02</span>
+                  <div>
+                    <b>受控工具</b><small>结构校验 · 路径约束 · 只读研究</small>
+                  </div>
+                </li>
+                <li>
+                  <span>03</span>
+                  <div>
+                    <b>执行与恢复</b><small>SQLite · 审批 · 幂等应用</small>
+                  </div>
+                </li>
+                <li>
+                  <span>04</span>
+                  <div>
+                    <b>验证与评测</b><small>语法检查 · 可选容器测试</small>
+                  </div>
+                </li>
+              </ol>
+            </section>
+            <section class="card mini">
+              <div class="eyebrow">按需加载</div>
+              <h3>知识与技能</h3>
+              <div id="knowledge" class="knowledge-stat">正在读取索引…</div>
+              <div id="skills" class="skills"></div>
+              <p class="hint">
+                检索为 BM25 + 词法向量 + RRF。技能目录先载入，正文按需读取。
+              </p>
+            </section>
+            <section class="note">
+              <span>学习提示</span>
+              <p>
+                先看一次完整轨迹，再阅读
+                <code>runtime.py</code
+                >。区分“模型想做什么”和“系统允许做什么”，是理解 Agent 的起点。
+              </p>
+              <a href="/docs" target="_blank">探索 API 接口 <span>↗</span></a>
+            </section>
+            <section class="card mini">
+              <div class="eyebrow">跨会话笔记</div>
+              <h3>显式保存一条记忆</h3>
+              <label class="sr-only" for="memory-key">记忆名称</label
+              ><input
+                id="memory-key"
+                placeholder="名称，如 review_preference"
+                maxlength="80"
+              /><label class="sr-only" for="memory-value">记忆正文</label
+              ><textarea
+                id="memory-value"
+                placeholder="需要后续任务参考的偏好…"
+                rows="2"
+                maxlength="2000"
+              ></textarea
+              ><button class="button secondary" id="save-memory">
+                保存笔记
+              </button>
+              <div id="memory-list" class="hint"></div>
+            </section>
+          </aside>
+        </div>
+        <footer>
+          基于 Anthropic 工程文章的独立学习实现
+          <span>单机教学工程 · 以执行轨迹为准</span>
+        </footer>
+      </div>
+    </main>
+    <div id="toast" role="alert" class="toast hidden"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
