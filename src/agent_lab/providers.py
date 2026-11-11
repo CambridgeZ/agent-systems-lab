@@ -73,17 +73,25 @@ class DemoProvider:
             for m in messages[1:]
             if m.get("role") == "user" and isinstance(m.get("content"), str)
         ]
-        if any(text.startswith("REVIEW_REJECTED: ") for text in decisions):
+        # 旧标记可能被裁掉。执行器从持久化审批对象重建状态，不靠模型猜测摘要。
+        harness_decisions = []
+        for text in decisions:
+            if text.startswith("HARNESS_STATE\n"):
+                try:
+                    harness_decisions = json.loads(text.split("\n", 1)[1]).get("decisions", [])
+                except (ValueError, AttributeError):
+                    pass
+        latest = harness_decisions[-1].get("decision") if harness_decisions else None
+        if latest == "rejected" or any(text.startswith("REVIEW_REJECTED: ") for text in decisions):
             return _response([{"type": "text", "text": "补丁已被用户拒绝，工作区保持原状。本次任务停止。"}])
-        if any(text.startswith("REVIEW_APPROVED: ") for text in decisions):
+        if latest == "approved" or any(text.startswith("REVIEW_APPROVED: ") for text in decisions):
             if not any("valid" in result or "syntax_ok" in result for result in results):
                 return _response([_call("verify_python", path="pricing.py"), _call("sandbox_test")])
             sandbox = next(
                 (
                     r
                     for r in results
-                    if r.get("code")
-                    in {"passed", "sandbox_unavailable", "sandbox_timeout", "sandbox_error", "tests_failed"}
+                    if r.get("code") in {"passed", "tests_failed"} or r.get("code", "").startswith("sandbox_")
                 ),
                 {},
             )

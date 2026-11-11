@@ -3,12 +3,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
-import subprocess
-from types import SimpleNamespace
 
 import pytest
 
-from agent_lab.storage import Storage
+from agent_lab.storage import Storage, digest
 from agent_lab.tools import ToolRegistry
 
 
@@ -168,7 +166,7 @@ def test_network_urls_are_never_fetched(registry):
 
 
 def test_sandbox_fails_closed_when_docker_is_absent(registry, monkeypatch):
-    monkeypatch.setattr("agent_lab.tools.shutil.which", lambda _: None)
+    monkeypatch.setattr("agent_lab.sandbox.shutil.which", lambda _: None)
     result = registry.execute("sandbox_test", {})
     assert result["code"] == "sandbox_unavailable"
     assert result["tests_executed"] is False
@@ -176,52 +174,31 @@ def test_sandbox_fails_closed_when_docker_is_absent(registry, monkeypatch):
 
 def test_modified_test_oracle_refuses_verification(registry, monkeypatch):
     (registry.workspace / "tests" / "test_pricing.py").write_text("# fake passing tests\n")
-    monkeypatch.setattr("agent_lab.tools.shutil.which", lambda _: None)
+    monkeypatch.setattr("agent_lab.sandbox.shutil.which", lambda _: None)
     assert registry.execute("sandbox_test", {})["code"] == "test_oracle_modified"
 
 
-def test_docker_has_bounded_readonly_networkless_nonroot_execution(registry, monkeypatch):
-    calls = []
-    monkeypatch.setattr("agent_lab.tools.shutil.which", lambda _: "/usr/bin/docker")
+def test_sandbox_delegates_only_workspace_and_protected_oracle(registry, monkeypatch):
+    seen = []
+    sentinel = {
+        "ok": False,
+        "code": "sandbox_timeout",
+        "tests_executed": None,
+        "cleanup_verified": True,
+        "cleanup_error": None,
+    }
 
-    def run(command, **kwargs):
-        calls.append(command)
-        if command[1] == "run":
-            kwargs["stdout"].write(b"Ran 4 tests\nOK\n")
-        return SimpleNamespace(returncode=0)
+    def run(self, workspace, oracle_sha256):
+        seen.append((workspace, oracle_sha256))
+        return sentinel
 
-    monkeypatch.setattr("agent_lab.tools.subprocess.run", run)
+    monkeypatch.setattr("agent_lab.sandbox.SandboxRunner.run", run)
     result = registry.execute("sandbox_test", {})
-    assert result["ok"] and result["tests_executed"]
-    command = next(command for command in calls if command[1] == "run")
-    for required in (
-        "--network=none",
-        "--read-only",
-        "--cap-drop=ALL",
-        "--pids-limit=64",
-        "--memory=128m",
-        "--user=65534:65534",
-        "--pull=never",
-    ):
-        assert required in command
-    assert not any("docker.sock" in value for value in command)
-    assert any(value.endswith("target=/workspace,readonly") for value in command)
-    assert calls[-1][1:3] == ["rm", "-f"]
-
-
-def test_docker_timeout_cleans_up_container(registry, monkeypatch):
-    calls = []
-    monkeypatch.setattr("agent_lab.tools.shutil.which", lambda _: "/usr/bin/docker")
-
-    def run(command, **kwargs):
-        calls.append(command)
-        if command[1] == "run":
-            raise subprocess.TimeoutExpired(command, 30)
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr("agent_lab.tools.subprocess.run", run)
-    assert registry.execute("sandbox_test", {})["code"] == "sandbox_timeout"
-    assert calls[-1][1:3] == ["rm", "-f"]
+    assert result == sentinel
+    assert seen == [(registry.workspace, digest((registry.workspace / "tests/test_pricing.py").read_text()))]
+    # 模型不能靠额外 schema 参数改镜像或选择任意命令。
+    assert registry.execute("sandbox_test", {"command": "id"})["code"] == "invalid_arguments"
+    assert len(seen) == 1
 
 
 @pytest.mark.asyncio

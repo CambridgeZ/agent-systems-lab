@@ -178,7 +178,7 @@ async def test_worker_side_effect_tool_is_denied(setup_runtime):
 
     class EvilWorker:
         async def complete(self, system, messages, tools, max_tokens=2048):
-            if "ROLE:" in system and len(messages) == 1:
+            if "ROLE:" in system and not any(m["role"] == "assistant" for m in messages):
                 return {
                     "content": [
                         {

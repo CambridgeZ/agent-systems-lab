@@ -11,12 +11,9 @@ import ast
 import difflib
 import json
 import os
-import shutil
-import subprocess
 import tempfile
 import threading
 import time
-import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -24,6 +21,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
 from agent_lab.storage import Storage, digest
+from agent_lab.sandbox import SandboxRunner
 
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_FILES = 128
@@ -125,13 +123,17 @@ class ToolRegistry:
         # 返回副本，防止调用方改变权限描述与验证规则。
         return json.loads(json.dumps(self._specs))
 
-    def execute(self, name: str, arguments: dict) -> dict:
+    def execute(self, name: str, arguments: dict, call_id: str | None = None) -> dict:
         started = time.monotonic()
         try:
             if name not in self._validators:
                 raise ToolError("unknown_tool", "工具不存在，不能动态执行函数名。")
             self._validators[name].validate(arguments)
-            result = getattr(self, name)(**arguments)
+            if name == "propose_patch":
+                # 幂等键只来自 Runtime 的 tool_use id，不接受模型自行传入隐藏参数。
+                result = self.propose_patch(**arguments, operation_id=call_id)
+            else:
+                result = getattr(self, name)(**arguments)
         except ValidationError as exc:
             result = {"ok": False, "code": "invalid_arguments", "error": exc.message[:500]}
         except ToolError as exc:
@@ -143,6 +145,7 @@ class ToolRegistry:
             "tool_audit",
             {
                 "tool": name,
+                "call_id": call_id,
                 "ok": result.get("ok", False),
                 "code": result.get("code"),
                 "duration_ms": round((time.monotonic() - started) * 1000, 2),
@@ -254,8 +257,45 @@ class ToolRegistry:
             "trust": "untrusted_reference_material",
         }
 
-    def propose_patch(self, path: str, old_text: str, new_text: str) -> dict:
+    @staticmethod
+    def _proposal_result(proposal: dict, *, replayed: bool = False) -> dict:
+        diff = "".join(
+            difflib.unified_diff(
+                proposal["old_content"].splitlines(keepends=True),
+                proposal["new_content"].splitlines(keepends=True),
+                fromfile=f"a/{proposal['path']}",
+                tofile=f"b/{proposal['path']}",
+            )
+        )
+        return {
+            "ok": True,
+            "proposal_id": proposal["id"],
+            "path": proposal["path"],
+            "diff": diff,
+            "status": proposal["status"],
+            "applied": proposal["applied"],
+            "requires_approval": proposal["status"] in {"pending", "approved"} and not proposal["applied"],
+            "replayed": replayed,
+        }
+
+    def propose_patch(
+        self, path: str, old_text: str, new_text: str, *, operation_id: str | None = None
+    ) -> dict:
         with self._lock:
+            if operation_id is not None:
+                # 若进程在提案创建后、结果 checkpoint 前退出，先找回原提案。
+                # 不再次读取已变化的源文件来制造“同一个调用的第二份提案”。
+                previous = self.storage.get_proposal_by_operation(self.run_id, operation_id)
+                if previous is not None:
+                    original = previous["old_content"]
+                    if (
+                        previous["path"] != path
+                        or not old_text
+                        or original.count(old_text) != 1
+                        or original.replace(old_text, new_text, 1) != previous["new_content"]
+                    ):
+                        raise ToolError("proposal_operation_conflict", "同一调用 ID 不能替换为另一份补丁。")
+                    return self._proposal_result(previous, replayed=True)
             source = self._path(path, editable=True)
             original = source.read_text(encoding="utf-8")
             if not old_text or original.count(old_text) != 1:
@@ -269,26 +309,14 @@ class ToolRegistry:
                 ast.parse(proposed, filename=path)
             except SyntaxError as exc:
                 raise ToolError("syntax_error", f"补丁无法解析：第 {exc.lineno} 行 {exc.msg}") from exc
-            proposal = self.storage.create_proposal(self.run_id, path, original, proposed)
-            diff = "".join(
-                difflib.unified_diff(
-                    original.splitlines(keepends=True),
-                    proposed.splitlines(keepends=True),
-                    fromfile=f"a/{path}",
-                    tofile=f"b/{path}",
-                )
-            )
+            proposal = self.storage.create_proposal(self.run_id, path, original, proposed, operation_id)
+            result = self._proposal_result(proposal)
             self.storage.add_event(
-                self.run_id, "patch_proposed", {"proposal_id": proposal["id"], "path": path, "diff": diff}
+                self.run_id,
+                "patch_proposed",
+                {"proposal_id": proposal["id"], "path": path, "diff": result["diff"]},
             )
-            return {
-                "ok": True,
-                "proposal_id": proposal["id"],
-                "path": path,
-                "diff": diff,
-                "status": "pending",
-                "requires_approval": True,
-            }
+            return result
 
     def apply_proposal(self, proposal_id: str) -> dict:
         """审批后的版本绑定写入；崩溃重试可识别已经落盘的新内容。
@@ -374,113 +402,9 @@ class ToolRegistry:
         }
 
     def sandbox_test(self) -> dict:
-        """容器不是绝对安全沙箱；这里只示范比宿主机 exec 更明确的边界。"""
+        """固定测试入口；隔离策略由代码决定，模型不能选择挂载、网络、镜像或 argv。"""
         oracle = self._path("tests/test_pricing.py")
         if digest(oracle.read_text(encoding="utf-8")) != _PRICING_TEST_SHA256:
             raise ToolError("test_oracle_modified", "验收测试与内置版本不一致，拒绝给出测试通过结论。")
-        docker = shutil.which("docker")
-        if not docker:
-            return {
-                "ok": False,
-                "code": "sandbox_unavailable",
-                "error": "未安装 Docker；未执行运行时测试。",
-                "tests_executed": False,
-            }
-        if "," in str(self.workspace):
-            raise ToolError("unsafe_workspace", "Docker mount 参数不接受含逗号的工作区路径。")
-        # 不把主机环境变量、凭证目录或 Docker socket 传入待执行代码。
-        try:
-            check = subprocess.run(
-                [docker, "image", "inspect", "python:3.12-slim"], capture_output=True, timeout=5, check=False
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return {
-                "ok": False,
-                "code": "sandbox_unavailable",
-                "error": "Docker 守护进程不可用。",
-                "tests_executed": False,
-            }
-        if check.returncode != 0:
-            return {
-                "ok": False,
-                "code": "sandbox_unavailable",
-                "error": "Docker 不可用或缺少 python:3.12-slim 镜像；请手动准备环境。",
-                "tests_executed": False,
-            }
-        # 拒绝挂载任何符号链接；测试只接触这个受限仓库。
-        for directory, subdirs, names in os.walk(self.workspace, followlinks=False):
-            if any((Path(directory) / name).is_symlink() for name in subdirs + names):
-                raise ToolError("unsafe_workspace", "运行测试前需移除工作区符号链接。")
-        name = f"agent-lab-{uuid.uuid4().hex[:16]}"
-        command = [
-            docker,
-            "run",
-            "--rm",
-            "--pull=never",
-            "--name",
-            name,
-            "--network=none",
-            "--read-only",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--pids-limit=64",
-            "--memory=128m",
-            "--cpus=1",
-            "--user=65534:65534",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=16m",
-            "--mount",
-            f"type=bind,source={self.workspace},target=/workspace,readonly",
-            "--workdir",
-            "/workspace",
-            "--env",
-            "PYTHONDONTWRITEBYTECODE=1",
-            "python:3.12-slim",
-            "python",
-            "-B",
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            "tests",
-            "-v",
-        ]
-        try:
-            # 日志写临时文件，避免模型制造无限 stdout 导致宿主内存暴涨。
-            with tempfile.TemporaryFile() as output:
-                try:
-                    result = subprocess.run(
-                        command, stdout=output, stderr=subprocess.STDOUT, timeout=30, check=False
-                    )
-                except subprocess.TimeoutExpired:
-                    return {
-                        "ok": False,
-                        "code": "sandbox_timeout",
-                        "error": "容器测试超过 30 秒，已终止。",
-                        "tests_executed": True,
-                    }
-                output.seek(0)
-                log = output.read(16000).decode("utf-8", errors="replace")
-            infrastructure_error = result.returncode in (125, 126, 127)
-            return {
-                "ok": result.returncode == 0,
-                "code": "passed"
-                if result.returncode == 0
-                else ("sandbox_error" if infrastructure_error else "tests_failed"),
-                "exit_code": result.returncode,
-                "tests_executed": not infrastructure_error,
-                "output": log,
-                "isolation": "docker_readonly_network_none",
-            }
-        finally:
-            # Python 超时会杀 docker 客户端，容器可能还活着，必须显式清理。
-            try:
-                subprocess.run(
-                    [docker, "rm", "-f", name],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+        # Runner 再核验复制后的 oracle，防止只校验原目录却执行了另一份内容。
+        return SandboxRunner().run(self.workspace, _PRICING_TEST_SHA256)

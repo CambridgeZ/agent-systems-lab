@@ -17,13 +17,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .runtime import AgentRuntime
+from .execution_lock import RunBusy
 from .storage import Storage
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -113,6 +114,9 @@ def create_app(state_dir: Path | None = None, provider: str | None = None) -> Fa
         async def work():
             try:
                 await operation()
+            except RunBusy:
+                # 另一个本机 CLI/API 已持锁；不能把它的正在运行状态覆盖为 failed。
+                storage.add_event(run_id, "run_busy", {"reason": "another_local_executor"})
             except Exception as exc:
                 # 除 Runtime 已捕获的模型异常外，也记录边界错误，禁止返回 SDK 细节。
                 current = get_run(run_id)
@@ -122,7 +126,15 @@ def create_app(state_dir: Path | None = None, provider: str | None = None) -> Fa
             finally:
                 await runtime.aclose()
 
-        jobs[run_id] = asyncio.create_task(work())
+        task = asyncio.create_task(work())
+        jobs[run_id] = task
+
+        def forget_finished(completed):
+            # 持久状态在 SQLite；完成任务不应永久占用进程内调度表。
+            if jobs.get(run_id) is completed:
+                jobs.pop(run_id)
+
+        task.add_done_callback(forget_finished)
 
     def public_run(run: dict) -> dict:
         # 消息与仓库内容可从审计事件查看；列表只返回轻量摘要，不暴露本机路径。
@@ -182,9 +194,36 @@ def create_app(state_dir: Path | None = None, provider: str | None = None) -> Fa
 
     @app.get("/api/runs/{run_id}")
     async def run_details(run_id: str):
-        run = public_run(get_run(run_id))
+        stored = get_run(run_id)
+        run = public_run(stored)
         run["proposals"] = storage.proposals(run_id)
+        run["context"] = stored["metadata"].get("context_stats", {})
+        run["active_skills"] = [
+            {key: snapshot[key] for key in ("name", "section", "sha256", "content_sha256")}
+            | {"content_chars": len(snapshot["content"])}
+            for snapshot in stored["metadata"].get("active_skills", {}).values()
+        ]
         return run
+
+    @app.get("/api/runs/{run_id}/calls")
+    async def calls(run_id: str):
+        get_run(run_id)
+        return storage.call_summaries(run_id)
+
+    @app.get("/api/runs/{run_id}/tool-result")
+    async def tool_result(
+        run_id: str,
+        call_id: str = Query(min_length=1, max_length=128),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=4000, ge=1, le=8000),
+    ):
+        get_run(run_id)
+        try:
+            return storage.get_call_result(run_id, call_id, offset, limit)
+        except KeyError as exc:
+            raise HTTPException(404, "调用结果不存在") from exc
+        except ValueError as exc:
+            raise HTTPException(409, "调用尚未产生结果") from exc
 
     @app.get("/api/runs/{run_id}/events")
     async def events(run_id: str, after: int = 0):

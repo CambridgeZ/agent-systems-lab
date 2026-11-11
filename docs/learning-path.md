@@ -85,3 +85,9 @@ uv run --no-sync ruff check src tests
 | 生产任务调度 | 两个执行者竞争同一任务时只允许一个持有有效 lease，过期后可安全接管 |
 
 先做实验，再把数字写入 README 或简历。模型成功率、提效比例、成本下降和生产安全能力都需要对应证据。
+
+## 专项练习：上下文与恢复
+
+完成基础路线后，阅读[长上下文、Skill 与工具状态专项说明](context-skills-state.md)，运行其中两个离线实验，再对照 `tests/test_runtime_optimization_review.py` 与 `tests/test_recovery_integration.py` 解释崩溃窗口。接着准备[进阶题45—80](interview-supplement.md)，优先回答51、53、54、74、75。
+
+阅读[沙盒专题](sandbox-mechanisms.md)，沿 `ToolRegistry.sandbox_test → SandboxRunner.run` 分析：只读副本为什么比直接挂载原仓库更可控，为什么日志也要限制，为什么超时必须清理容器，退出码0为什么不足以证明四个测试执行完成。

@@ -48,6 +48,13 @@ def main():
     sub.add_parser("list", help="查看本机任务")
     trace = sub.add_parser("trace", help="查看持久化事件")
     trace.add_argument("run_id")
+    calls = sub.add_parser("calls", help="查看持久化工具调用状态摘要")
+    calls.add_argument("run_id")
+    result = sub.add_parser("result", help="按调用 ID 分页查看完整结果 JSON 文本与哈希")
+    result.add_argument("run_id")
+    result.add_argument("call_id")
+    result.add_argument("--offset", type=int, default=0)
+    result.add_argument("--limit", type=int, default=4000)
     evaluate = sub.add_parser("eval", help="运行隔离离线评测")
     evaluate.add_argument("--report", type=Path, default=ROOT / "reports/eval.json")
     evaluate.add_argument("--trials", type=int, default=1)
@@ -76,6 +83,17 @@ def main():
         return
     if args.command == "trace":
         show(storage.events(args.run_id))
+        return
+    if args.command == "calls":
+        if not storage.get_run(args.run_id):
+            parser.error("任务不存在")
+        show(storage.call_summaries(args.run_id))
+        return
+    if args.command == "result":
+        try:
+            show(storage.get_call_result(args.run_id, args.call_id, args.offset, args.limit))
+        except (ValueError, KeyError) as exc:
+            parser.error(str(exc))
         return
     if args.command in {"run", "demo"}:
         import uuid

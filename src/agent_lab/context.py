@@ -1,4 +1,4 @@
-"""按协议完整性裁剪对话，而不是对 JSON 做任意字符串截断。"""
+"""按协议完整性裁剪对话，保留显式工作状态，并计入请求的固定开销。"""
 
 from __future__ import annotations
 
@@ -13,19 +13,31 @@ def _blocks(message: dict, kind: str) -> list[dict]:
     return [block for block in content if isinstance(block, dict) and block.get("type") == kind]
 
 
+def _item_size(message: dict) -> int:
+    # 字符预算可复演，但不是 tokenizer：中文、英文和 schema 的 token 比例不同。
+    return len(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+
+
 def _size(messages: list[dict]) -> int:
-    # 这是序列化字符预算，便于离线确定性测试。中文、英文、工具 schema 的真实
-    # token 数不同，最终 token 使用量必须以模型服务返回的 usage 为准。
-    return len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+    # 单独序列化每条消息，避免为很长的原始日志再分配一个同样大的 JSON 字符串。
+    # JSON 数组长度 = 两侧括号 + 每项长度 + 项间逗号。
+    return 2 + sum(_item_size(message) for message in messages) + max(0, len(messages) - 1)
+
+
+class ContextOverflow(ValueError):
+    """原任务、固定工作状态或最新完整工具交换无法装入剩余字符预算。"""
 
 
 class ContextManager:
-    """保留最初任务与最近信息，整体删除旧的工具调用/结果消息对。
+    """保留最初任务、显式 pinned 工作状态与最近完整工具交换。
 
     一条 assistant 消息可能同时请求多个工具；紧随其后的 user 消息必须含有所有
     对应 tool_result。它们组成一个原子组，绝不只留下结果或只留下调用。
-    这里实现的是可审计的历史截断，并未调用 LLM 生成语义摘要。持久化完整历史
-    由 Storage 负责；build 不会修改输入，故运行记录与裁剪后的推理上下文分离。
+
+    pinned 是运行时从持久状态重建的普通 user 消息，例如当前审批对象和已加载技能；
+    它不会升级成 system 权限。裁剪只移除旧历史，不让这些显式工作状态随历史消失。
+    reserved_chars 则由调用方提供，用于预留系统指令、工具目录等非 messages 开销。
+    这是序列化字符预算，既不包含服务商隐藏包装，也不保证等于真实 token 上限。
     """
 
     def __init__(self, max_chars: int = 24_000):
@@ -85,7 +97,7 @@ class ContextManager:
         first = deepcopy(first)
         notice = (
             f"\n\n[上下文管理：已有 {dropped} 条较早消息按完整工具往返移除。"
-            "完整记录仍在事件日志中；不能假定被移除的细节，必要时重新读取证据。]"
+            "持久化对话与调用账本仍保留记录；不能假定被移除的细节，必要时重新读取证据。]"
         )
         if isinstance(first.get("content"), str):
             first["content"] += notice
@@ -95,48 +107,95 @@ class ContextManager:
             raise ValueError("消息 content 必须是字符串或内容块列表")
         return first
 
-    def build(self, messages: list[dict]) -> list[dict]:
-        """返回预算内的消息副本；原任务与最新原子组太大时显式失败。
+    @staticmethod
+    def _validate_pinned(pinned: list[dict]) -> None:
+        # pinned 位于历史工具交换之前，不能带孤立结果或伪造调用；只接受低权限文本。
+        for message in pinned:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                raise ValueError("pinned 必须是普通 user 文本消息，不能使用 system/assistant 角色")
+            content = message.get("content")
+            if isinstance(content, str):
+                continue
+            if (
+                not isinstance(content, list)
+                or not content
+                or any(
+                    not isinstance(block, dict)
+                    or block.get("type") != "text"
+                    or not isinstance(block.get("text"), str)
+                    for block in content
+                )
+            ):
+                raise ValueError("pinned 只接受字符串或 text 块，不能包含工具调用/结果")
 
-        不能悄悄截断最近工具返回：那会把 JSON、源码或证据切坏，导致模型依据
-        不完整数据行动。调用方应缩小工具输出或提高预算，然后恢复运行。
+    def build(
+        self, messages: list[dict], *, pinned: list[dict] | None = None, reserved_chars: int = 0
+    ) -> list[dict]:
+        """构造预算内的消息副本；原任务与必需内容装不下时显式失败。
+
+        不截断 JSON、源码或最新工具结果。大结果应由运行时先保存，再投影为包含
+        取回引用的有界结果；本层只负责保留协议与删除完整旧组，不假装生成语义摘要。
+        组大小预计算一次，裁剪时只减去旧组开销，避免每删一组都重序列化全部历史。
         """
-        if not messages:
-            self._stats = {
-                "original_messages": 0,
-                "kept_messages": 0,
-                "dropped_messages": 0,
-                "original_chars": 2,
-                "kept_chars": 2,
-            }
-            return []
-        copied = deepcopy(messages)
-        if not isinstance(copied[0], dict) or copied[0].get("role") != "user":
+        if isinstance(reserved_chars, bool) or not isinstance(reserved_chars, int) or reserved_chars < 0:
+            raise ValueError("reserved_chars 必须是非负整数")
+        if not isinstance(messages, list):
+            raise ValueError("messages 必须是消息列表")
+        if pinned is None:
+            pinned = []
+        if not isinstance(pinned, list):
+            raise ValueError("pinned 必须是消息列表")
+        self._validate_pinned(pinned)
+        if not messages and pinned:
+            raise ValueError("提供 pinned 时仍需要最初的 user 任务消息")
+
+        # 只扫描原始引用；验证与裁剪不修改它们。最终仅复制保留部分，避免复制整份长日志。
+        if messages and (not isinstance(messages[0], dict) or messages[0].get("role") != "user"):
             raise ValueError("上下文必须从 user 任务消息开始")
-        groups = self._atomic_groups(copied)
-        # 首条任务始终固定；其余按原子组构造最近后缀。
-        if len(groups[0]) != 1:
+        groups = self._atomic_groups(messages)
+        if groups and len(groups[0]) != 1:
             raise ValueError("首条消息必须是普通 user 任务，不能是工具结果")
-        original_size = _size(copied)
+        original_size = _size(messages)
+        effective_budget = self.max_chars - reserved_chars
+        pinned_cost = sum(_item_size(message) + 1 for message in pinned)
+        pinned_size = _size(pinned) if pinned else 0
         tail = groups[1:]
+        # 每条消息多计一个分隔逗号；存在首条任务时，它恰好等于追加各组的字符增量。
+        group_costs = [sum(_item_size(message) + 1 for message in group) for group in tail]
+        remaining_cost = sum(group_costs)
         removed = 0
+        dropped_groups = 0
         while True:
-            first = self._with_notice(copied[0], removed)
-            candidate = [first] + [message for group in tail for message in group]
-            if _size(candidate) <= self.max_chars:
-                self._stats = {
-                    "original_messages": len(messages),
-                    "kept_messages": len(candidate),
-                    "dropped_messages": removed,
-                    "original_chars": original_size,
-                    "kept_chars": _size(candidate),
-                    "budget_kind": "serialized_characters_not_tokens",
-                }
-                return candidate
-            # 最新一组不能删除；只剩下原任务时同样不能再缩小。
-            if len(tail) <= 1:
-                raise ValueError("原任务与最新完整消息组超过上下文字符预算")
-            removed += len(tail.pop(0))
+            first = self._with_notice(messages[0], removed) if messages else None
+            candidate_size = 2 + _item_size(first) + pinned_cost + remaining_cost if first else 2
+            self._stats = {
+                "original_messages": len(messages),
+                "kept_messages": len(messages) - removed + len(pinned),
+                "kept_history_messages": len(messages) - removed,
+                "dropped_messages": removed,
+                "dropped_groups": dropped_groups,
+                "original_chars": original_size,
+                "kept_chars": candidate_size,
+                "pinned_messages": len(pinned),
+                "pinned_chars": pinned_size,
+                "reserved_chars": reserved_chars,
+                "effective_message_budget": effective_budget,
+                "request_chars": candidate_size + reserved_chars,
+                "max_chars": self.max_chars,
+                "budget_kind": "serialized_characters_not_tokens",
+                "overflow": candidate_size > effective_budget,
+            }
+            if candidate_size <= effective_budget:
+                candidate = ([first] + pinned if first else []) + [
+                    message for group in tail[dropped_groups:] for message in group
+                ]
+                return deepcopy(candidate)
+            # 最新一组不能删除；只剩下原任务、固定工作状态时也不能继续缩小。
+            if len(tail) - dropped_groups <= 1:
+                raise ContextOverflow("原任务、固定工作状态与最新完整消息组超过上下文字符预算")
+            removed += len(tail[dropped_groups])
+            remaining_cost -= group_costs[dropped_groups]
+            dropped_groups += 1
 
     def stats(self) -> dict:
         return dict(self._stats)
