@@ -233,6 +233,146 @@ async def test_incomplete_receipt_or_unavailable_docker_never_counts_as_passed(t
     )
     done = await runtime.execute(created["id"])
     assert done["status"] == "completed"
-    assert done["metadata"]["verification"]["status"] == "unavailable"
+    assert done["metadata"]["verification"]["status"] == "failed"
+    assert done["metadata"]["verification"]["last_code"] == "sandbox_incomplete"
     assert done["metadata"]["verification"]["committed_sha"] is None
     assert resolve_commit(worktree, "HEAD") == base_commit
+
+
+async def test_sandbox_infra_unavailable_maps_to_unavailable_status(tmp_path, monkeypatch):
+    origin = tmp_path / "origin"
+    worktree = tmp_path / "wt"
+    base_commit = init_git_repo_from_dir(ROOT / "data/sample_repo", origin)
+    git_meta = create_task_worktree(origin, worktree, ref=base_commit)
+    oracles, expected_tests = discover_test_oracles(worktree)
+    storage = Storage(tmp_path / "state.db")
+
+    monkeypatch.setattr(
+        SandboxRunner,
+        "run_suite",
+        lambda self, ws, orc, expected_tests, pattern="test*.py": {
+            "ok": False,
+            "code": "sandbox_unavailable",
+            "tests_executed": False,
+            "output": "docker daemon unreachable",
+        },
+    )
+
+    class InfraDownProvider:
+        async def complete(self, system, messages, tools, max_tokens=2048):
+            results = [
+                json.loads(b["content"])
+                for m in messages
+                if isinstance(m.get("content"), list)
+                for b in m["content"]
+                if b.get("type") == "tool_result"
+            ]
+            if not results:
+                return _resp([_call("sandbox_test")])
+            return _resp([{"type": "text", "text": "Docker 不可用，已如实报告。"}])
+
+    runtime = AgentRuntime(
+        storage,
+        worktree,
+        ROOT / "data/knowledge",
+        ROOT / "skills",
+        provider=InfraDownProvider(),
+        commit_on_pass=True,
+    )
+    created = runtime.create(
+        "基础设施不可用检测",
+        extra_metadata={"git": git_meta, "test_oracles": oracles, "expected_tests": expected_tests},
+    )
+    done = await runtime.execute(created["id"])
+    assert done["status"] == "completed"
+    ver = done["metadata"]["verification"]
+    assert ver["status"] == "unavailable"
+    assert ver["last_code"] == "sandbox_unavailable"
+    assert ver["committed_sha"] is None
+    assert resolve_commit(worktree, "HEAD") == base_commit
+
+
+async def test_second_patch_after_auto_commit_advances_base_commit_cleanly(tmp_path, monkeypatch):
+    origin = tmp_path / "origin"
+    worktree = tmp_path / "wt"
+    base_commit = init_git_repo_from_dir(ROOT / "data/sample_repo", origin)
+    caller_git_meta = create_task_worktree(origin, worktree, ref=base_commit)
+    oracles, expected_tests = discover_test_oracles(worktree)
+    storage = Storage(tmp_path / "state.db")
+
+    monkeypatch.setattr(
+        SandboxRunner,
+        "run_suite",
+        lambda self, ws, orc, expected_tests, pattern="test*.py": {
+            "ok": True,
+            "code": "passed",
+            "tests_executed": True,
+            "output": "OK",
+        },
+    )
+
+    class TwoSequentialCommitsProvider:
+        async def complete(self, system, messages, tools, max_tokens=2048):
+            results = [
+                json.loads(b["content"])
+                for m in messages
+                if isinstance(m.get("content"), list)
+                for b in m["content"]
+                if b.get("type") == "tool_result"
+            ]
+            proposals = [r for r in results if r.get("proposal_id")]
+            tests = [r for r in results if r.get("code") == "passed"]
+            if len(proposals) == 0:
+                return _resp(
+                    [
+                        _call(
+                            "propose_patch",
+                            path="pricing.py",
+                            old_text="return subtotal * (1 - discount_percent)",
+                            new_text="return subtotal * (1 - discount_percent / 100)",
+                        )
+                    ]
+                )
+            if len(proposals) == 1 and len(tests) == 0:
+                return _resp([_call("sandbox_test")])
+            if len(proposals) == 1 and len(tests) == 1:
+                return _resp(
+                    [
+                        _call(
+                            "propose_patch",
+                            path="pricing.py",
+                            old_text="return subtotal * (1 - discount_percent / 100)",
+                            new_text="return round(subtotal * (1 - discount_percent / 100), 6)",
+                        )
+                    ]
+                )
+            if len(proposals) == 2 and len(tests) == 1:
+                return _resp([_call("sandbox_test")])
+            return _resp([{"type": "text", "text": "两阶段提交均验证通过。"}])
+
+    runtime = AgentRuntime(
+        storage,
+        worktree,
+        ROOT / "data/knowledge",
+        ROOT / "skills",
+        provider=TwoSequentialCommitsProvider(),
+        commit_on_pass=True,
+        auto_approve_proposals=True,
+    )
+    created = runtime.create(
+        "连续两次自动提交测试",
+        extra_metadata={"git": caller_git_meta, "test_oracles": oracles, "expected_tests": expected_tests},
+    )
+    done = await runtime.execute(created["id"])
+    assert done["status"] == "completed"
+    # 调用方传入的字典未被原地污染
+    assert caller_git_meta["base_commit"] == base_commit
+    git_state = done["metadata"]["git"]
+    assert git_state["initial_base_commit"] == base_commit
+    commit_events = [e for e in storage.events(done["id"]) if e["kind"] == "git_committed"]
+    assert len(commit_events) == 2
+    first_sha = commit_events[0]["payload"]["commit_sha"]
+    second_sha = commit_events[1]["payload"]["commit_sha"]
+    assert first_sha != base_commit and second_sha != first_sha
+    assert git_state["base_commit"] == second_sha
+    assert resolve_commit(worktree, "HEAD") == second_sha

@@ -4,8 +4,7 @@ This is a Chinese learning project for coding-agent engineering. Keep implementa
 
 - Explain non-obvious design decisions with Chinese comments/docstrings; preserve clear, readable code.
 - Keep DemoProvider and the `reference` benchmark executor explicitly labeled (`harness_regression_only` / `benchmark_harness_verification_only`). Never describe scripted or reference passes as real LLM coding scores.
-- All model writes (single-file `propose_patch` and multi-file atomic `propose_changeset`) must remain proposals bound to the exact run/current approval, per-file source SHA-256, Git worktree baseline (`base_commit`), and active lease `epoch`.
-- Do not execute generated Python on the host. AST parsing is syntax-only; Docker test runs (`run` and `run_suite`) fail closed and keep `verification.status` strictly separate from `run.status == "completed"`.
+- Default `execution_profile="sandbox"` keeps all model writes (`propose_patch` and `propose_changeset`) strictly proposal-gated and never executes generated Python on the host. Opt-in `execution_profile="host"` / `"computer"` (`agent-lab code`, `agent-lab run --cwd`, or Web `local_cwd`) enables host filesystem (`fs_*`), scrubbed `bash_exec`, Desktop GUI (`computer_*`), dynamic `subagent_run`, and external `McpClientManager` under explicit three-tier permissions (`ask` / `auto-edit` / `full-auto`), and `gc_expired_resources` never deletes `direct_workspace` directories.
 - Preserve complete tool_use/tool_result pairs during context trimming and checkpoint recovery.
 - Working memory facts (`working_memory_write`) must verify SHA-256 provenance against workspace files or committed `tool_calls` and flip to `stale` when underlying files change; working memory never overrides `HARNESS_STATE` approval records.
 - Do not add credentials, local state, personal repositories or blog full text to source control.

@@ -14,24 +14,34 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import httpx
+import pytest
 
 from agent_lab.api import ROOT, create_app
 from agent_lab.context import ContextManager
 from agent_lab.kv_cache import (
+    _MAX_TRACKED_BLOCKS,
     build_anthropic_cached_payload,
     canonical_json,
     chained_block_hashes,
+    record_kv_step,
     serialize_kv_stream,
     simulate_kv_cache_ablation,
 )
-from agent_lab.providers import AnthropicProvider, OpenAICompatibleProvider
+from agent_lab.providers import (
+    AnthropicProvider,
+    OpenAICompatibleProvider,
+    ProviderRateLimiter,
+    compute_usage_totals,
+)
 from agent_lab.runtime import AgentRuntime
 from agent_lab.storage import Storage
 
@@ -485,3 +495,533 @@ def test_ablation_benchmark_and_api_endpoints(tmp_path):
     assert out_report.is_file()
     parsed = json.loads(proc.stdout)
     assert parsed["optimized"]["cumulative_hit_rate"] > parsed["legacy"]["cumulative_hit_rate"]
+
+
+def test_root_pinned_lru_tracker_and_tight_ablation_budgets(tmp_path):
+    assert _MAX_TRACKED_BLOCKS == 2048
+
+    tools = [
+        {
+            "name": f"tool_{idx}",
+            "description": f"受控工具说明 {idx} " + ("S" * 80),
+            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+        }
+        for idx in range(8)
+    ]
+    base_system = "共享根系统指令 " * 30
+    root_hashes = chained_block_hashes(serialize_kv_stream(base_system, tools, []))
+    assert 16 <= len(root_hashes) <= 128
+
+    kv_state = None
+    # 1) 多轮高流失消息写入超过 _MAX_TRACKED_BLOCKS 个块，根前缀块不得被 FIFO 淘汰
+    for step in range(28):
+        big_msg = [{"role": "user", "content": f"turn={step}:" + (f"{step:02d}_payload_" * 600)}]
+        kv_state, report = record_kv_step(kv_state, system=base_system, tools=tools, messages=big_msg)
+        assert len(kv_state["known_blocks"]) <= _MAX_TRACKED_BLOCKS
+        if step > 0:
+            assert report["hit_blocks"] >= len(root_hashes)
+
+    # 2) 单步超长请求（> 2048 块）后，下一步子代理仍 100% 命中根前缀块
+    huge_single = [{"role": "user", "content": "H" * (64 * 2400)}]
+    kv_state, _ = record_kv_step(kv_state, system=base_system, tools=tools, messages=huge_single)
+    assert len(kv_state["known_blocks"]) == _MAX_TRACKED_BLOCKS
+
+    kv_state, subagent_step = record_kv_step(
+        kv_state,
+        system=base_system + "\nROLE:reviewer\n只读审查",
+        tools=tools,
+        messages=[{"role": "user", "content": "新子任务"}],
+        worker="reviewer",
+    )
+    assert subagent_step["hit_blocks"] >= len(root_hashes)
+
+    # 3) 紧凑预算 max_chars=2400 / 3200 消融实验与 API 查询均不触发 ContextOverflow
+    with pytest.raises(ValueError, match="max_chars 至少需要 2400"):
+        simulate_kv_cache_ablation(turns=8, max_chars=2000)
+
+    for budget in (2400, 3200, 4800):
+        tight_report = simulate_kv_cache_ablation(turns=16, max_chars=budget)
+        assert tight_report["optimized"]["cumulative_hit_rate"] > tight_report["legacy"]["cumulative_hit_rate"]
+
+    app = create_app(state_dir=tmp_path / "tight_api_state", provider="demo")
+    with TestClient(app) as client:
+        resp = client.get("/api/kv-benchmark?max_chars=3200")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["optimized"]["cumulative_hit_rate"] > body["legacy"]["cumulative_hit_rate"]
+
+
+async def test_anthropic_thinking_blocks_roundtrip_and_usage_totals():
+    tools = [{"name": "repo_read", "description": "读文件", "input_schema": {"type": "object"}}]
+    messages = [
+        {"role": "user", "content": "分析根因"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "先检查入口"},
+                {"type": "thinking", "thinking": "内部推导步骤", "signature": "sig_123"},
+                {"type": "redacted_thinking", "data": "enc_blob"},
+            ],
+        },
+        {"role": "user", "content": 'HARNESS_STATE\n{"step":2}'},
+    ]
+    payload = build_anthropic_cached_payload(
+        "系统提示",
+        messages,
+        tools,
+        max_tokens=4096,
+        tail_state_count=1,
+        thinking={"type": "enabled", "budget_tokens": 1536},
+    )
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 1536}
+    assistant_blocks = payload["messages"][1]["content"]
+    # 第 3 个断点向前回退到非 thinking 的 text 块，绝不打在 thinking / redacted_thinking 上
+    assert assistant_blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in assistant_blocks[1]
+    assert "cache_control" not in assistant_blocks[2]
+
+    payload_no_thinking = build_anthropic_cached_payload("系统提示", messages[:1], tools)
+    assert "thinking" not in payload_no_thinking
+
+    # AnthropicProvider 保留 thinking / redacted_thinking、忽略良性元数据块，并正确处理 max_tokens 截断
+    assert AnthropicProvider.cache_usage_additive is True
+
+    async def fake_create_thinking(**kwargs):
+        del kwargs
+        blocks = [
+            SimpleNamespace(
+                model_dump=lambda exclude_none=True: {
+                    "type": "thinking",
+                    "thinking": "推理链...",
+                    "signature": "sig_abc",
+                }
+            ),
+            SimpleNamespace(
+                model_dump=lambda exclude_none=True: {
+                    "type": "redacted_thinking",
+                    "data": "opaque_cipher",
+                }
+            ),
+            SimpleNamespace(
+                model_dump=lambda exclude_none=True: {
+                    "type": "server_tool_use",
+                    "id": "srv_1",
+                }
+            ),
+            SimpleNamespace(
+                model_dump=lambda exclude_none=True: {
+                    "type": "tool_use",
+                    "id": "call:raw/1",
+                    "name": "repo_read",
+                    "input": {"path": "pricing.py"},
+                }
+            ),
+        ]
+        usage = SimpleNamespace(
+            input_tokens=50,
+            output_tokens=30,
+            cache_read_input_tokens=400,
+            cache_creation_input_tokens=100,
+        )
+        return SimpleNamespace(content=blocks, stop_reason="tool_use", usage=usage)
+
+    anth = AnthropicProvider.__new__(AnthropicProvider)
+    anth.model = "claude-sonnet-test"
+    anth.client = SimpleNamespace(messages=SimpleNamespace(create=fake_create_thinking))
+    res = await anth.complete("系统提示", [{"role": "user", "content": "检查"}], tools)
+    assert res["stop_reason"] == "tool_use"
+    assert res["content"] == [
+        {"type": "thinking", "thinking": "推理链...", "signature": "sig_abc"},
+        {"type": "redacted_thinking", "data": "opaque_cipher"},
+        {"type": "tool_use", "id": "call_raw_1", "name": "repo_read", "input": {"path": "pricing.py"}},
+    ]
+
+    # max_tokens 截断半截 tool_use 时转为可恢复响应，不抛异常中断任务
+    async def fake_create_cutoff(**kwargs):
+        del kwargs
+        blocks = [
+            {"type": "thinking", "thinking": "长思考...", "signature": "sig_cut"},
+            {"type": "tool_use", "id": "cut_1", "name": "propose_patch", "input": {}},
+        ]
+        return SimpleNamespace(
+            content=blocks,
+            stop_reason="max_tokens",
+            usage=SimpleNamespace(input_tokens=20, output_tokens=2048),
+        )
+
+    anth.client = SimpleNamespace(messages=SimpleNamespace(create=fake_create_cutoff))
+    cutoff_res = await anth.complete("系统提示", [{"role": "user", "content": "修改"}], tools)
+    assert cutoff_res["truncated"] is True
+    assert cutoff_res["stop_reason"] == "tool_use"
+    assert "__truncated_or_invalid_json__" in cutoff_res["content"][-1]["input"]
+
+    # compute_usage_totals：区分 Anthropic 累加型与 OpenAI 包含型缓存计费
+    anth_totals = compute_usage_totals(res["usage"], additive_cache=True)
+    assert anth_totals == {
+        "total_input_tokens": 550,
+        "billed_input_tokens": 50 + int(round(1.25 * 100)) + int(round(0.10 * 400)),
+        "output_tokens": 30,
+        "effective_budget_tokens": 580,
+    }
+    oai_totals = compute_usage_totals(
+        {"input_tokens": 600, "output_tokens": 25, "cache_read_input_tokens": 500},
+        additive_cache=False,
+    )
+    assert oai_totals == {
+        "total_input_tokens": 600,
+        "billed_input_tokens": 100 + int(round(0.25 * 500)),
+        "output_tokens": 25,
+        "effective_budget_tokens": 625,
+    }
+
+
+async def test_openai_resilience_coalescing_sanitization_and_sse_streaming(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-only")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+
+    # 1. 相邻 user 消息合并（\n\n 连接）且跳过 assistant thinking / redacted_thinking 块
+    translated = OpenAICompatibleProvider._to_openai_messages(
+        "sys",
+        [
+            {"role": "user", "content": "初始任务"},
+            {"role": "user", "content": "SKILL_SNAPSHOT\n{}"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "secret", "signature": "s"},
+                    {"type": "redacted_thinking", "data": "enc"},
+                    {"type": "tool_use", "id": "call_1", "name": "repo_list", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": '{"ok":true}'}],
+            },
+            {"role": "user", "content": "HARNESS_STATE\n{}"},
+            {"role": "user", "content": "WORKING_MEMORY\n{}"},
+        ],
+    )
+    roles = [m["role"] for m in translated]
+    assert roles == ["system", "user", "assistant", "tool", "user"]
+    assert translated[1]["content"] == "初始任务\n\nSKILL_SNAPSHOT\n{}"
+    assert translated[-1]["content"] == "HARNESS_STATE\n{}\n\nWORKING_MEMORY\n{}"
+    assert translated[2]["content"] is None
+    assert len(translated[2]["tool_calls"]) == 1
+
+    # 2. 429 Retry-After 退避恢复 + 422 prompt_cache_key 自动降级 + ID 消毒去重 + 截断 JSON 容错
+    seen_payloads: list[dict] = []
+    call_counter = {"n": 0}
+
+    def resilient_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(body)
+        call_counter["n"] += 1
+        if call_counter["n"] == 1:
+            assert "prompt_cache_key" in body
+            return httpx.Response(422, json={"error": "extra_forbidden: prompt_cache_key"})
+        if call_counter["n"] == 2:
+            assert "prompt_cache_key" not in body
+            return httpx.Response(429, headers={"Retry-After": "0.01"}, json={"error": "rate_limited"})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_hist",  # 与历史 ID 冲突 -> 自动加后缀
+                                    "type": "function",
+                                    "function": {"name": "repo_read", "arguments": '{"path":"pricing.py"}'},
+                                },
+                                {
+                                    "id": "bad:id/with spaces!",  # 含非法字符 + 截断 JSON
+                                    "type": "function",
+                                    "function": {"name": "propose_patch", "arguments": '{"path":"pricing.py","old'},
+                                },
+                                {
+                                    "id": "bad:id/with spaces!",  # 同轮重复 ID
+                                    "type": "function",
+                                    "function": {"name": "repo_list", "arguments": ""},
+                                },
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 120, "completion_tokens": 64},
+            },
+        )
+
+    oai = OpenAICompatibleProvider(base_retry_delay=0.01, max_retry_delay=0.05)
+    await oai.client.aclose()
+    oai.client = httpx.AsyncClient(
+        base_url="https://api.example.test/v1", transport=httpx.MockTransport(resilient_handler)
+    )
+    history_with_id = [
+        {"role": "user", "content": "开始"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "call_hist", "name": "repo_list", "input": {}}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "call_hist", "content": "{}"}],
+        },
+    ]
+    try:
+        res_recovered = await oai.complete("sys", history_with_id, [], cache_key="run_1")
+        assert oai._supports_prompt_cache_key is False
+        assert call_counter["n"] == 3
+        assert res_recovered["stop_reason"] == "tool_use"
+        assert res_recovered["truncated"] is True
+        ids = [b["id"] for b in res_recovered["content"]]
+        assert len(set(ids)) == 3
+        assert "call_hist" not in ids
+        assert all(re.fullmatch(r"[A-Za-z0-9_-]+", cid) for cid in ids)
+        assert res_recovered["content"][0]["input"] == {"path": "pricing.py"}
+        assert "__truncated_or_invalid_json__" in res_recovered["content"][1]["input"]
+        assert "__truncated_or_invalid_json__" in res_recovered["content"][2]["input"]
+    finally:
+        await oai.aclose()
+
+    # 3. 已知严格第三方网关默认不发 prompt_cache_key + 备用网关自动故障转移 + 空 choices 拦截
+    failover_urls: list[str] = []
+
+    def failover_handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        failover_urls.append(url)
+        body = json.loads(request.content.decode("utf-8"))
+        if "groq.com" in url:
+            assert "prompt_cache_key" not in body
+            return httpx.Response(503, json={"error": "upstream_down"})
+        return httpx.Response(200, json={"choices": [], "usage": {}})
+
+    oai_fb = OpenAICompatibleProvider(
+        max_retries=1,
+        fallback_base_urls=["https://backup.example.test/v1"],
+        base_retry_delay=0.005,
+        max_retry_delay=0.02,
+    )
+    await oai_fb.client.aclose()
+    oai_fb.client = httpx.AsyncClient(
+        base_url="https://api.groq.com/openai/v1", transport=httpx.MockTransport(failover_handler)
+    )
+    try:
+        with pytest.raises(ValueError, match="OpenAI 兼容网关返回空 choices"):
+            await oai_fb.complete("sys", [{"role": "user", "content": "hi"}], [], cache_key="run_2")
+        assert sum("groq.com" in u for u in failover_urls) == 2
+        assert any("backup.example.test" in u for u in failover_urls)
+    finally:
+        await oai_fb.aclose()
+
+    # 4. SSE 流式增量拼接（文本 delta + 多工具分片 + finish_reason + include_usage）
+    sse_seen_req: dict = {}
+    sse_lines = [
+        ": keep-alive",
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"正在"},"finish_reason":null}]}',
+        'data: {"choices":[{"index":0,"delta":{"content":"读取代码"},"finish_reason":null}]}',
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_s1","type":"function","function":{"name":"repo_read","arguments":"{\\"pa"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_s1","function":{"arguments":"th\\":\\"pricing.py\\"}"}}]},"finish_reason":"tool_calls"}]}',
+        'data: {"choices":[],"usage":{"prompt_tokens":320,"completion_tokens":18,"prompt_tokens_details":{"cached_tokens":256}}}',
+        "data: [DONE]",
+    ]
+    sse_body = ("\n\n".join(sse_lines) + "\n\n").encode("utf-8")
+
+    def sse_handler(request: httpx.Request) -> httpx.Response:
+        sse_seen_req.update(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=sse_body,
+        )
+
+    monkeypatch.setenv("OPENAI_STREAM", "1")
+    oai_stream = OpenAICompatibleProvider()
+    await oai_stream.client.aclose()
+    oai_stream.client = httpx.AsyncClient(
+        base_url="https://api.openai.com/v1", transport=httpx.MockTransport(sse_handler)
+    )
+    try:
+        stream_res = await oai_stream.complete(
+            "sys", [{"role": "user", "content": "检查"}], [], cache_key="stream_run"
+        )
+    finally:
+        await oai_stream.aclose()
+
+    assert sse_seen_req["stream"] is True
+    assert sse_seen_req["stream_options"] == {"include_usage": True}
+    assert stream_res["stop_reason"] == "tool_use"
+    assert stream_res["truncated"] is False
+    assert stream_res["content"] == [
+        {"type": "text", "text": "正在读取代码"},
+        {"type": "tool_use", "id": "call_s1", "name": "repo_read", "input": {"path": "pricing.py"}},
+    ]
+    assert stream_res["usage"] == {
+        "input_tokens": 320,
+        "output_tokens": 18,
+        "cache_read_input_tokens": 256,
+    }
+
+
+async def test_provider_rate_limiter_rpm_tpm_and_zero_sleep_default(monkeypatch):
+    monkeypatch.delenv("AGENT_LAB_RPM_LIMIT", raising=False)
+    monkeypatch.delenv("AGENT_LAB_TPM_LIMIT", raising=False)
+
+    slept: list[float] = []
+    now_box = [100.0]
+
+    async def fake_sleep(sec: float) -> None:
+        slept.append(sec)
+        now_box[0] += sec
+
+    # 默认未设环境变量时零休眠直通
+    disabled = ProviderRateLimiter(clock=lambda: now_box[0], sleep=fake_sleep)
+    assert disabled.enabled is False
+    for _ in range(10):
+        await disabled.reserve(50_000)
+        disabled.record_actual(60_000, 50_000)
+    assert slept == []
+
+    # 配置 RPM=2, TPM=1000 时严格滑窗准入，且 record_actual 退还高估预留额
+    monkeypatch.setenv("AGENT_LAB_RPM_LIMIT", "2")
+    monkeypatch.setenv("AGENT_LAB_TPM_LIMIT", "1000")
+    limiter = ProviderRateLimiter(window_seconds=60.0, clock=lambda: now_box[0], sleep=fake_sleep)
+    assert limiter.enabled is True
+
+    r1 = await limiter.reserve(800)
+    assert slept == []
+    # 实际仅消耗 300 token -> 退还 500 token，使下一笔 600 token 请求无需等待 TPM
+    limiter.record_actual(300, r1)
+
+    r2 = await limiter.reserve(600)
+    assert slept == []
+    limiter.record_actual(600, r2)
+
+    # 第 3 次请求触发 RPM=2 限制，等待滑窗释放
+    await limiter.reserve(100)
+    assert len(slept) == 1 and slept[0] >= 59.9
+
+    # 跨线程并发调用 reserve_sync / record_actual 保持线程安全
+    sync_limiter = ProviderRateLimiter(rpm_limit=100, tpm_limit=100_000)
+    errors: list[Exception] = []
+
+    def worker_fn() -> None:
+        try:
+            res_tok = sync_limiter.reserve_sync(200)
+            sync_limiter.record_actual(150, res_tok)
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker_fn) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+
+
+async def test_openai_provider_deduplicates_constant_call_id_across_context_compaction(tmp_path, monkeypatch):
+    ws = _make_workspace(tmp_path)
+    (ws / "large_module.py").write_text("PAYLOAD = '" + ("M" * 1500) + "'\n", encoding="utf-8")
+    storage = Storage(tmp_path / "state.db")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-only")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+
+    turn_counter = {"n": 0}
+    seen_request_msg_counts: list[int] = []
+
+    def constant_call_id_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        seen_request_msg_counts.append(len(body["messages"]))
+        idx = turn_counter["n"]
+        turn_counter["n"] += 1
+        if idx < 6:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "finish_reason": "tool_calls",
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_0",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "repo_read",
+                                            "arguments": '{"path":"large_module.py"}',
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 120, "completion_tokens": 20},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "已完成全部 6 轮代码核查。"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 120, "completion_tokens": 15},
+            },
+        )
+
+    oai = OpenAICompatibleProvider()
+    await oai.client.aclose()
+    oai.client = httpx.AsyncClient(
+        base_url="https://api.example.test/v1",
+        transport=httpx.MockTransport(constant_call_id_handler),
+    )
+    try:
+        probe = AgentRuntime(storage, ws, ROOT / "data/knowledge", ROOT / "skills", provider=oai)
+        probe_run = probe.create("测量固定开销")
+        probe_tools = probe._registry(probe_run).definitions()
+        from agent_lab.runtime import EXTRA_TOOLS
+
+        fixed_chars = len(
+            json.dumps(
+                {"system": probe._system(probe_run), "tools": probe_tools + EXTRA_TOOLS, "messages": []},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        runtime = AgentRuntime(
+            storage,
+            ws,
+            ROOT / "data/knowledge",
+            ROOT / "skills",
+            provider=oai,
+            max_steps=10,
+            context_chars=fixed_chars + 4800,
+        )
+        created = runtime.create("连续 6 轮读取 large_module.py 触发上下文裁剪")
+        completed = await runtime.execute(created["id"])
+    finally:
+        await oai.aclose()
+
+    assert completed["status"] == "completed", completed
+    assert turn_counter["n"] == 7
+    assert completed["metadata"]["context_stats"]["dropped_messages"] >= 2
+    calls = storage.list_calls(created["id"])
+    assert [c["call_id"] for c in calls] == [
+        "call_0",
+        "call_0_2",
+        "call_0_3",
+        "call_0_4",
+        "call_0_5",
+        "call_0_6",
+    ]
+
+

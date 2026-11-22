@@ -87,3 +87,87 @@ def test_duplicate_metadata_is_rejected_instead_of_silently_overridden(tmp_path)
     assert catalog.catalog() == []
     with pytest.raises(ValueError, match="不能重复"):
         catalog.load("code-review")
+
+
+def test_crlf_skill_loading_inspecting_and_section_snapshotting(tmp_path, monkeypatch):
+    folder = tmp_path / "crlf-review"
+    folder.mkdir()
+    raw_crlf = (
+        "---\r\n"
+        "name: crlf-review\r\n"
+        'description: "CRLF 元数据: 支持 Windows 换行"\r\n'
+        "---\r\n\r\n"
+        "# Overview\r\n"
+        "先阅读目标文件。\r\n"
+        "```python\r\n"
+        "# FakeHeading\r\n"
+        "def check(): pass\r\n"
+        "```\r\n"
+        "## Checklist\r\n"
+        "核对边界测试。\r\n"
+        "# Rollback\r\n"
+        "保留回滚路径。\r\n"
+    )
+    (folder / "SKILL.md").write_bytes(raw_crlf.encode("utf-8"))
+
+    assert SkillCatalog._metadata(raw_crlf, "crlf-review") == {
+        "name": "crlf-review",
+        "description": "CRLF 元数据: 支持 Windows 换行",
+    }
+    assert SkillCatalog._metadata(
+        "---\r\nname: crlf-review\r\ndescription: EOF closing\r\n---", "crlf-review"
+    )["description"] == "EOF closing"
+
+    catalog = SkillCatalog(tmp_path)
+    assert catalog.catalog() == [
+        {"name": "crlf-review", "description": "CRLF 元数据: 支持 Windows 换行"}
+    ]
+    assert "先阅读目标文件" in catalog.load("crlf-review")
+
+    info = catalog.inspect("crlf-review")
+    assert info["sections"] == ["Overview", "Checklist", "Rollback"]
+    overview = catalog.snapshot("crlf-review", "Overview")
+    assert "# FakeHeading" in overview["content"]
+    assert "## Checklist" in overview["content"]
+    assert "# Rollback" not in overview["content"]
+
+    # 直接以未转换的 CRLF 文本走 inspect/snapshot，验证原始偏移与章节切片完全对齐。
+    monkeypatch.setattr(catalog, "_read", lambda _: raw_crlf)
+    crlf_info = catalog.inspect("crlf-review")
+    assert crlf_info["sections"] == ["Overview", "Checklist", "Rollback"]
+    crlf_checklist = catalog.snapshot("crlf-review", "Checklist")
+    assert crlf_checklist["content"] == "## Checklist\r\n核对边界测试。"
+
+
+def test_catalog_status_reports_truncation_and_invalid_skipped(tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    root.mkdir()
+    for idx in range(5):
+        write_skill(root, name=f"skill-{idx}", description=f"desc {idx}")
+
+    broken = root / "broken-meta"
+    broken.mkdir()
+    (broken / "SKILL.md").write_text("# Missing frontmatter\n", encoding="utf-8")
+
+    write_skill(root, name="too-large", body="x" * 25_000)
+
+    external = write_skill(tmp_path / "external", name="outside")
+    (root / "linked-outside").symlink_to(external.parent, target_is_directory=True)
+
+    catalog = SkillCatalog(root)
+    assert catalog.MAX_CATALOG == 32
+    full_status = catalog.catalog_status()
+    assert full_status["max_catalog"] == 32
+    assert full_status["total_discovered"] == 5
+    assert full_status["truncated"] is False
+    assert full_status["skills"] == catalog.catalog()
+    assert full_status["invalid_skipped"] == ["broken-meta", "linked-outside", "too-large"]
+
+    monkeypatch.setattr(catalog, "MAX_CATALOG", 3)
+    truncated_status = catalog.catalog_status()
+    assert truncated_status["max_catalog"] == 3
+    assert truncated_status["total_discovered"] == 5
+    assert truncated_status["truncated"] is True
+    assert [item["name"] for item in truncated_status["skills"]] == ["skill-0", "skill-1", "skill-2"]
+    assert truncated_status["skills"] == catalog.catalog()
+    assert truncated_status["invalid_skipped"] == ["broken-meta", "linked-outside", "too-large"]

@@ -36,8 +36,8 @@
             阅读代码 → 检索知识 → 提出补丁 → 人工审批 → 验证结果。<br />在同一条执行轨迹里，观察模型、工具和执行框架如何配合。
           </p>
           <div class="capabilities">
-            <span>Git Worktree</span><span>Multi-File CAS</span><span>Repair Loop</span
-            ><span>Lease + Epoch</span><span>AST RepoMap</span><span>Provenance Memory</span>
+            <span>Host Bash + FS</span><span>Desktop GUI Use</span><span>Dreaming + Wiki Memory</span
+            ><span>Subagents + MCP Client</span><span>3-Tier Permissions</span><span>Git Worktree</span>
           </div>
         </section>
         <div class="layout">
@@ -54,10 +54,11 @@
               <div class="composer-footer">
                 <div class="composer-selects">
                   <label
-                    >仓库模板
+                    >工作区模式
                     <select id="template">
-                      <option value="sample">单文件 · pricing.py</option>
+                      <option value="sample">隔离示例 · pricing.py</option>
                       <option value="multi_file">多文件 Git Worktree · 结算封顶</option>
+                      <option value="local_cwd">本地目录直连 · 电脑操控</option>
                     </select></label
                   >
                   <label
@@ -68,10 +69,29 @@
                       <option value="parallel">Parallel · 双 Worker 研究</option>
                     </select></label
                   >
+                  <label id="perm-wrap" class="hidden"
+                    >权限策略
+                    <select id="permission-mode">
+                      <option value="auto-edit" selected>Auto-Edit · 自动改文件/审命令</option>
+                      <option value="ask">Ask · 写文件与跑命令均需确认</option>
+                      <option value="full-auto">Full-Auto · 全自动自主执行</option>
+                    </select></label
+                  >
+                  <label id="gui-wrap" class="checkbox-label hidden"
+                    ><input type="checkbox" id="enable-gui" /> 启用桌面 GUI 操控</label
+                  >
                 </div
                 ><button class="button primary-button" id="start">
                   开始运行 <span>↗</span>
                 </button>
+              </div>
+              <div id="local-cwd-row" class="local-cwd-row hidden">
+                <label for="workspace-path">本地目标目录路径</label>
+                <input
+                  id="workspace-path"
+                  type="text"
+                  placeholder="例如 /path/to/your-project（留空默认当前服务根目录）"
+                />
               </div>
               <p class="hint" id="demo-note">
                 DEMO 为确定性内置场景；真实 Claude 接入由服务端配置。
@@ -103,20 +123,45 @@
               <button id="resume" class="button secondary hidden">
                 恢复任务 ↻
               </button>
+              <button id="cancel" class="button danger hidden">取消任务 ✕</button>
             </section>
             <section id="proposal-card" class="card hidden">
               <div class="card-heading">
-                <span>▤ &nbsp; 待审批补丁</span
+                <span>▤ &nbsp; 待人工确认动作 / 补丁</span
                 ><span class="status waiting_approval">等待你的决定</span>
               </div>
               <p class="hint">
-                批准后才写入任务副本。审批绑定原始文件摘要，防止覆盖期间发生的修改。
+                批准后才执行命令、GUI 动作或写入工作区文件。文件变更绑定 SHA-256 防止并发覆盖。
               </p>
               <div id="proposals"></div>
             </section>
             <section id="answer-card" class="card hidden">
               <div class="card-heading"><span>✓ &nbsp; 运行结果</span></div>
               <pre id="answer" class="answer"></pre>
+            </section>
+            <section id="followup-card" class="card composer hidden">
+              <div class="card-heading">
+                <span><b class="tiny-icon">↳</b> 继续多轮对话（共享当前工作区与上下文）</span>
+                <label class="small muted"
+                  >当前权限
+                  <select id="run-perm-mode">
+                    <option value="ask">Ask</option>
+                    <option value="auto-edit">Auto-Edit</option>
+                    <option value="full-auto">Full-Auto</option>
+                  </select></label
+                >
+              </div>
+              <textarea
+                id="followup-prompt"
+                rows="2"
+                placeholder="继续输入下一条指令（例如：运行测试并把报错修掉 / 截取当前屏幕查看效果）…"
+              ></textarea>
+              <div class="composer-footer">
+                <span class="muted">沿用当前会话历史、结构化工作记忆与 KV Cache 前缀</span>
+                <button class="button primary-button" id="send-followup">
+                  发送后续指令 <span>↗</span>
+                </button>
+              </div>
             </section>
           </div>
           <aside class="right-rail">
@@ -179,8 +224,34 @@
               <a href="/docs" target="_blank">探索 API 接口 <span>↗</span></a>
             </section>
             <section class="card mini">
-              <div class="eyebrow">跨会话笔记</div>
-              <h3>显式保存一条记忆</h3>
+              <div class="eyebrow">AGENT MEMORY & DREAMING</div>
+              <h3>分层记忆 · Wiki 图谱 · Dreaming</h3>
+              <div id="memory-budget-stat" class="knowledge-stat">正在读取记忆层级…</div>
+              <div id="dream-stat" class="state-box muted">每次会话完成后默认自动运行 Dreaming 纠错与建图。</div>
+              <div class="dream-controls">
+                <input
+                  id="dream-goal"
+                  placeholder="可选聚焦目标（如：结算模块边界规则）"
+                  maxlength="200"
+                />
+                <button class="button secondary" id="run-dream">
+                  立即运行 Dreaming ↻
+                </button>
+              </div>
+              <details id="memory-index-details" class="repomap-details">
+                <summary>查看 MEMORY.md 顶层注入索引</summary>
+                <pre id="memory-index-pre"></pre>
+              </details>
+              <div id="wiki-pages-list" class="wiki-pages-list"></div>
+              <details id="wiki-page-viewer" class="repomap-details hidden">
+                <summary id="wiki-page-title">查看笔记正文与双向链接</summary>
+                <div id="wiki-page-meta" class="muted"></div>
+                <pre id="wiki-page-body"></pre>
+              </details>
+            </section>
+            <section class="card mini">
+              <div class="eyebrow">显式偏好笔记</div>
+              <h3>快速保存键值偏好</h3>
               <label class="sr-only" for="memory-key">记忆名称</label
               ><input
                 id="memory-key"

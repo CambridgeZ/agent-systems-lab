@@ -19,7 +19,9 @@ import json
 from typing import Any
 
 DEFAULT_BLOCK_CHARS = 64  # 约对应 16—20 个源码/JSON token，贴近 vLLM 默认 16-token 物理块粒度
-_MAX_TRACKED_BLOCKS = 8192
+_MAX_TRACKED_BLOCKS = 2048
+_PINNED_ROOT_BLOCKS = 128
+_NON_CACHEABLE_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
 
 def canonical_json(value: Any) -> str:
@@ -86,24 +88,31 @@ def record_kv_step(
     """记录单次模型请求的链式前缀块命中情况，返回更新后的持久状态与单步指标。"""
     state = deepcopy(kv_state) if isinstance(kv_state, dict) else {}
     block_chars = int(state.get("block_chars", block_chars))
-    known_list: list[str] = list(state.get("known_blocks", []))
-    known_set = set(known_list)
+    lru: dict[str, None] = dict.fromkeys(state.get("known_blocks", []))
 
     stream = serialize_kv_stream(system, tools, messages)
     hashes = chained_block_hashes(stream, block_chars=block_chars)
     hit_blocks = 0
     for digest_hex in hashes:
-        if digest_hex in known_set:
+        if digest_hex in lru:
             hit_blocks += 1
         else:
             break
 
+    # 命中的旧块与新增块一并移至 MRU 尾部；驱逐时始终固定前 min(128, len(hashes)) 个根前缀块（<TOOLS>+<SYSTEM_BASE>）
     for digest_hex in hashes:
-        if digest_hex not in known_set:
-            known_set.add(digest_hex)
-            known_list.append(digest_hex)
-    if len(known_list) > _MAX_TRACKED_BLOCKS:
-        known_list = known_list[-_MAX_TRACKED_BLOCKS:]
+        lru.pop(digest_hex, None)
+        lru[digest_hex] = None
+
+    if len(lru) > _MAX_TRACKED_BLOCKS:
+        pinned_roots = hashes[: min(_PINNED_ROOT_BLOCKS, len(hashes))]
+        pinned_set = set(pinned_roots)
+        tail_budget = max(0, _MAX_TRACKED_BLOCKS - len(pinned_set))
+        non_pinned = [b for b in lru if b not in pinned_set]
+        kept_tail = non_pinned[-tail_budget:] if tail_budget > 0 else []
+        known_list = list(dict.fromkeys([*pinned_roots, *kept_tail]))[:_MAX_TRACKED_BLOCKS]
+    else:
+        known_list = list(lru)
 
     total_chars = len(stream)
     cached_chars = min(total_chars, hit_blocks * block_chars)
@@ -193,7 +202,11 @@ def summarize_kv_cache(kv_state: dict[str, Any] | None) -> dict[str, Any]:
 def _to_content_blocks(content: str | list[dict]) -> list[dict]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
-    return deepcopy(content)
+    copied = deepcopy(content)
+    for block in copied:
+        if isinstance(block, dict) and block.get("type") in _NON_CACHEABLE_BLOCK_TYPES:
+            block.pop("cache_control", None)
+    return copied
 
 
 def build_anthropic_cached_payload(
@@ -203,6 +216,7 @@ def build_anthropic_cached_payload(
     *,
     max_tokens: int = 2048,
     tail_state_count: int = 0,
+    thinking: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """构造带 3 处显式 cache_control 断点且严格满足角色交替的 Anthropic 请求负载。
 
@@ -210,6 +224,7 @@ def build_anthropic_cached_payload(
     1. tools[-1]：缓存整套规范化工具 JSON Schema；
     2. system[0]（共享基础系统提示）：主协调者与只读子 Agent 共享同一缓存前缀；
     3. 尾部瞬态状态之前的最后一个稳定历史内容块：使每步新增工具往返命中滚动历史缓存。
+       若目标块为 thinking / redacted_thinking，则向前回退至最近的 text / tool_use / tool_result 块。
     """
     cached_tools = canonical_tools(tools)
     if cached_tools:
@@ -240,14 +255,33 @@ def build_anthropic_cached_payload(
 
     if last_stable_coord is not None:
         msg_idx, blk_idx = last_stable_coord
-        coalesced[msg_idx]["content"][blk_idx]["cache_control"] = {"type": "ephemeral"}
+        placed = False
+        for b_idx in range(blk_idx, -1, -1):
+            candidate = coalesced[msg_idx]["content"][b_idx]
+            if candidate.get("type") not in _NON_CACHEABLE_BLOCK_TYPES:
+                candidate["cache_control"] = {"type": "ephemeral"}
+                placed = True
+                break
+        if not placed:
+            for m_idx in range(msg_idx - 1, -1, -1):
+                msg_blocks = coalesced[m_idx]["content"]
+                for b_idx in range(len(msg_blocks) - 1, -1, -1):
+                    if msg_blocks[b_idx].get("type") not in _NON_CACHEABLE_BLOCK_TYPES:
+                        msg_blocks[b_idx]["cache_control"] = {"type": "ephemeral"}
+                        placed = True
+                        break
+                if placed:
+                    break
 
-    return {
+    payload: dict[str, Any] = {
         "system": system_blocks,
         "messages": coalesced,
         "tools": cached_tools,
         "max_tokens": max_tokens,
     }
+    if thinking is not None:
+        payload["thinking"] = deepcopy(thinking)
+    return payload
 
 
 def simulate_kv_cache_ablation(
@@ -255,31 +289,58 @@ def simulate_kv_cache_ablation(
     max_chars: int = 6800,
     block_chars: int = DEFAULT_BLOCK_CHARS,
 ) -> dict[str, Any]:
-    """在完全相同的多子代理 + 14 步工具轨迹上对比优化前后的链式前缀块命中率。
+    """在完全相同的多子代理 + 工具轨迹上对比优化前后的链式前缀块命中率。
 
     - legacy：工具子集过滤 + HARNESS_STATE/WORKING_MEMORY 前置在历史之前 + 满预算后每步滑动删 1 组
     - optimized：全量规范工具共享 + 动态状态移至尾部瞬态消息 + 62% 低水位阶梯式压缩
     """
     from .context import ContextManager
 
-    base_system = ("你是谨慎的 Python 代码开发 Agent。\n" * 18).strip()
+    if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 2400:
+        raise ValueError("max_chars 至少需要 2400")
+    if isinstance(turns, bool) or not isinstance(turns, int) or turns < 1:
+        raise ValueError("turns 至少为 1")
+
+    if max_chars < 5200:
+        scale = max_chars / 6800.0
+        sys_repeats = max(4, int(18 * scale))
+        tool_count = max(4, min(10, int(round(10 * scale))))
+        short_desc = max_chars < 3800
+        evidence_repeats = 1 if max_chars < 3000 else max(2, int(6 * scale))
+    else:
+        sys_repeats = 18
+        tool_count = 10
+        short_desc = False
+        evidence_repeats = 6
+
+    base_system = ("你是谨慎的 Python 代码开发 Agent。\n" * sys_repeats).strip()
     full_tools = [
         {
             "name": f"tool_{idx}",
-            "description": f"受控编码工具 {idx}，用于读取代码、检索符号或运行受限容器验证。",
+            "description": (
+                f"受控工具 {idx}"
+                if short_desc
+                else (
+                    f"受控编码工具 {idx}，读取或验证代码。"
+                    if max_chars < 5200
+                    else f"受控编码工具 {idx}，用于读取代码、检索符号或运行受限容器验证。"
+                )
+            ),
             "input_schema": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}, "query": {"type": "string"}},
                 "required": ["path"],
             },
         }
-        for idx in range(10)
+        for idx in range(tool_count)
     ]
-    readonly_tools = full_tools[:5]
+    readonly_tools = full_tools[: max(2, tool_count // 2)]
     initial_task = {"role": "user", "content": "请定位并修复跨模块结算与重试退避缺陷，并在容器中验证。"}
 
     def make_exchange(step: int) -> list[dict]:
-        evidence = f"step={step}: " + ("def compute_settlement(item_cents, cap): return item_cents\n" * 6)
+        evidence = f"step={step}: " + (
+            "def compute_settlement(item_cents, cap): return item_cents\n" * evidence_repeats
+        )
         return [
             {
                 "role": "assistant",
@@ -402,8 +463,10 @@ def simulate_kv_cache_ablation(
         "optimized": {**opt_summary, "compaction_events": opt_compactions},
         "improvement": {
             "hit_rate_delta": round(opt_summary["cumulative_hit_rate"] - legacy_summary["cumulative_hit_rate"], 4),
-            "uncached_prefill_reduction_pct": round(
-                (1.0 - opt_summary["uncached_chars"] / legacy_summary["uncached_chars"]) * 100, 2
+            "uncached_prefill_reduction_pct": (
+                round((1.0 - opt_summary["uncached_chars"] / legacy_summary["uncached_chars"]) * 100, 2)
+                if legacy_summary["uncached_chars"]
+                else 0.0
             ),
             "estimated_effective_input_cost_saving_pct": cost_saving_pct,
         },

@@ -1,8 +1,8 @@
 # 代码 Agent 的沙盒：限制执行能力，保留验证证据
 
-代码 Agent 生成的 Python 即使能通过语法检查，也可能读文件、连接网络、创建子进程或无限输出。沙盒把这些能力限制在明确边界内；人工审批则决定是否接受某次修改。两者共同使用，不能互相代替。本项目用 Docker 运行教学仓库的业务测试，执行前制作受限源码快照，执行后保留版本、结果和清理状态；它不是已经完成抗容器逃逸审计的恶意代码执行平台。
+代码 Agent 生成的 Python 即使能通过语法检查，也可能读文件、连接网络、创建子进程、篡改测试框架或无限输出。沙盒把这些能力限制在明确边界内；人工审批则决定是否接受某次修改。两者共同使用，不能互相代替。本项目用 Docker（或解耦的远程沙盒节点）运行受保护业务测试，执行前制作受限源码与夹具快照，容器内采用外层纯标准库 Supervisor + 内层受审计 Child 的双进程防伪回执架构，执行后保留版本、结果和清理状态；它显著收紧了同容器结果伪造面，但仍共享运行环境的 Linux 内核，不是已完成抗容器逃逸审计的公网多租户恶意代码平台。
 
-源码阅读顺序：[tools.py](../src/agent_lab/tools.py) 的 `sandbox_test()` → [sandbox.py](../src/agent_lab/sandbox.py) → [sandbox_smoke.py](../scripts/sandbox_smoke.py) → [CI](../.github/workflows/ci.yml)。工具调用的持久化与未知状态见 [上下文、Skill 与工具状态](context-skills-state.md)。
+源码阅读顺序：[tools.py](../src/agent_lab/tools.py) 的 `sandbox_test()` → [sandbox.py](../src/agent_lab/sandbox.py) → [api.py](../src/agent_lab/api.py) 的 `/api/internal/sandbox/execute` → [sandbox_smoke.py](../scripts/sandbox_smoke.py) → [CI](../.github/workflows/ci.yml)。工具调用的持久化与未知状态见 [上下文、Skill 与工具状态](context-skills-state.md)，15 项生产高可用演进全貌见 [生产级高可用架构演进](production-ha-hardening.md)。
 
 ## 1. 审批回答“允许改什么”，沙盒回答“运行时能碰什么”
 
@@ -18,29 +18,32 @@ Anthropic 的沙盒设计也强调文件系统和网络两个边界：只限制�
 
 ```mermaid
 flowchart TD
-    A[固定工具入口与参数校验] --> B[核对受保护测试版本]
-    B --> C[建立有大小上限的 Python 源码副本]
-    C --> D[记录快照与本地镜像身份]
-    D --> E[只读挂载副本并启动受限容器]
-    E --> F[流式读取有上限的输出并监控时间]
-    F --> G[判定业务结果与基础设施结果]
-    G --> H[finally 强制清理并记录是否成功]
-    H --> I[完整结果进入工具账本]
+    A[固定工具入口与参数校验] --> B[AST 静态解析受保护测试文件哈希与数量]
+    B --> C[建立有大小上限的源码与测试夹具快照]
+    C --> D{配置 AGENT_LAB_SANDBOX_URL?}
+    D -- 否：本地 Docker --> E[校验本地不可变镜像 ID + BoundedSemaphore 限流]
+    E --> F[只读挂载快照并打标 managed/expires-at 启动容器]
+    D -- 是：解耦沙盒池 --> R[RemoteHTTPSandboxBackend 转发 /api/internal/sandbox/execute]
+    F --> G[PID 1 Supervisor 匿名管道注入 32B HMAC 密钥并清洗伪造前缀]
+    R --> H[归一化校验 SANDBOX_FAILURE_CODES 与 SANDBOX_INFRA_CODES]
+    G --> H
+    H --> I[finally 强制 docker rm -f 与快照清理并保留原始执行结论]
+    I --> J[完整结果进入工具账本、修复回环与评测分母]
 ```
 
 这里没有给模型任意 `docker run` 参数、镜像名、shell 命令或宿主挂载路径。模型只能调用固定 `sandbox_test`，真正的参数由确定性代码构造。否则即使工具叫“沙盒”，模型仍可能请求 privileged 容器或挂载 Docker socket，直接绕过边界。
 
-### 文件系统：挂载最少的副本，而不是整个活工作区
+### 文件系统、包布局与测试夹具：挂载最小受控副本，兼容 `src/` 与非秘密夹具
 
-增强后的执行器只复制运行当前教学测试需要的 `.py` 源文件，跳过隐藏路径、已知敏感文件名和不需要的数据；对遍历到的非隐藏路径拒绝符号链接、硬链接、FIFO 与其他特殊文件，并限制单文件大小、文件数量及总容量。复制时通过目录文件描述符与 `O_NOFOLLOW` 打开，核对打开文件的属性及读取前后签名，避免把路径检查后被替换的链接当成普通源文件。临时副本作为只读 bind mount 放入容器；容器根文件系统同样只读，必要临时写入只允许在有界 tmpfs 中完成。
+增强后的执行器在单文件模式（`_snapshot`）仅复制 `.py` 源文件；在多文件套件模式（`_snapshot_suite`）除复制全部非隐藏 `.py` 源码外，还允许复制 `tests/` 目录下受白名单后缀 `_SUITE_FIXTURE_SUFFIXES`（`.json`、`.yaml`、`.yml`、`.toml`、`.txt`、`.csv`）约束的非秘密测试夹具，并同时拦截命中 `_SENSITIVE_NAMES` 与 `_SENSITIVE_STEMS`（如 `credentials.*`、`secrets.*`、`private_key.*`、`tokens.*`）的敏感文件。遍历时拒绝符号链接、硬链接、FIFO 与其他特殊文件，并限制单文件大小、文件数量及总容量；复制时通过目录文件描述符与 `O_NOFOLLOW | O_NONBLOCK` 打开，核对读取前后 `(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns, st_nlink)` 签名，避免 TOCTOU 替换竞争。临时副本置为 `0444` 并作为只读 bind mount 放入 `/workspace`；容器根文件系统同样只读，必要临时写入只允许在 `16 MiB` `noexec,nosuid` 的 `/tmp` tmpfs 中完成。
 
-这样既减少把 `.git`、`.env`、密钥文件或无关材料暴露给待测代码的机会，也避免测试直接读到主工作区随后变化的文件。文件名过滤不是秘密扫描器：普通 `.py` 文件里若已经硬编码密钥，仍可能被复制。仓库自身仍应禁止提交凭证。
+为兼容现代 Python 包结构，内层 runner 启动后若检测到 `/workspace/src` 目录存在，会自动将 `/workspace/src` 与 `/workspace` 按序插入 `sys.path`，无需在容器内执行 `pip install -e .` 即可测试 `src/` 布局仓库与平铺布局仓库。文件名过滤仍不是秘密扫描器：普通业务源码或测试 JSON 中若硬编码真实密钥，仍会被复制，仓库自身必须禁止提交凭证。
 
-“源码副本快照”也不是整个虚拟机快照或多文件事务快照。逐个复制文件时若另一个执行者同时修改源目录，仍需要锁或版本校验来定义一致性；当前读取校验与版本记录不能泛化成任意仓库的全局一致快照。仅复制 Python 的策略适用于这个教学仓库，不支持所有包含资源文件、动态库和构建产物的工程。
+### 网络与远程沙盒解耦：默认无外连，容器化控制面不挂载 Docker Socket
 
-### 网络：默认无外连，依赖准备和测试执行分开
+测试容器固定使用 `--network=none`，不继承宿主代理环境、模型 API key 或 Git 凭证，不挂载 `/var/run/docker.sock`。执行阶段使用 `--pull=never` 禁止自动拉取镜像，也不在容器里联网安装依赖。
 
-容器使用 `--network=none`，不继承宿主代理环境、模型 API key 或 Git 凭证，不挂载 Docker socket。执行阶段不自动拉取镜像，也不在容器里联网安装依赖；镜像应由操作者或 CI 的准备步骤事先获得。
+当 `agent-systems-lab` 自身运行在生产容器内（见 `Dockerfile`）时，若为了让 API 容器启动兄弟测试容器而把宿主机 `/var/run/docker.sock` 挂入控制面容器，等同于向控制面交出宿主机 root 等价权限。为此，`SandboxRunner` 内置解耦的 `RemoteHTTPSandboxBackend`：当配置 `AGENT_LAB_SANDBOX_URL`（可选搭配独立共享密钥 `AGENT_LAB_SANDBOX_TOKEN`）时，控制面先在本地完成路径安全校验、敏感文件剔除、受保护测试哈希核验与 Base64 快照打包，再通过无重定向的 HTTP `POST /api/internal/sandbox/execute` 发送给隔离沙盒池节点，由远端 `execute_remote_sandbox_payload()` 重建临时只读目录、二次校验 `snapshot_sha256` 并在远端本地 Docker 中执行。返回报文经状态码、JSON 结构、枚举集合与回执自洽性（如严拒 `ok=True` 但 `code != "passed"` 或 `tests_executed is not True` 的矛盾回执）多重校验后合入本地结果。
 
 这能限制普通网络连接，但不能把“无网络”说成“没有任何信息流出”：stdout/stderr 仍会进入工具结果，容器退出状态与耗时也可被观察。因此仍应减少输入中的秘密，并对结果和日志做访问控制。
 
@@ -83,29 +86,47 @@ Docker 默认会为容器配置网络；禁网需要显式设置。镜像 tag �
 
 镜像固定也不等于镜像安全。镜像里可能有漏洞或敏感文件；生产镜像需要独立的来源、构建、扫描、签名与更新策略。本项目没有实现镜像供应链审计服务。
 
-## 4. 输出与超时：停止 docker 客户端还不够
+## 4. 输出、并发信号量与孤儿容器回收：停止 docker 客户端还不够
 
 以前把 stdout 写临时文件、最后只读取前一段，虽然能限制返回给模型的文字，却可能让临时文件在读取前无限增长。把 `capture_output=True` 换成临时文件也没有解决日志型磁盘 DoS。
 
-本次实现使用 `Popen`、selector 和 `os.read` 持续读取输出，合并 stderr，不按行等待；最多实际读取上限加一个字节以检测超限，返回内容仍限制在上限内。达到总量上限或墙钟超时就结束执行，不只是最后截断展示。Docker daemon 自身的日志也不能无限保存，所以执行器显式使用 `--log-driver=none`。
+本次实现使用 `Popen`、selector 和 `os.read` 持续读取输出，合并 stderr，不按行等待；最多实际读取上限加一个字节以检测超限，返回内容仍限制在上限内。达到总量上限或墙钟超时就结束执行，不只是最后截断展示。Docker daemon 自身的日志也不能无限保存，所以执行器显式使用 `--log-driver=none`。同时，节点级并发度受模块全局 `_SANDBOX_SEMAPHORE = threading.BoundedSemaphore(...)`（由 `AGENT_LAB_SANDBOX_CONCURRENCY` 配置，默认 `4`）保护，避免多协程或多请求突增瞬间打爆宿主机容器并发上限。
 
-进入容器执行阶段后，正常结束、测试失败、输出超限、超时、客户端异常都经过 finally，尝试 `docker rm -f <本次唯一容器名>`。执行器不依赖 `--rm` 自动删除，而检查这次清理命令的回执。因为终止 docker CLI 不一定终止服务端容器，不能只对 `Popen` 调用 kill 就宣布“沙盒已销毁”。
+进入容器执行阶段后，每个容器都会统一打上受控治理标签 `--label agent-lab.managed=1` 与 `--label agent-lab.expires-at=<unix_ts>`（默认 `timeout_seconds + 30` 秒后到期）。正常结束、测试失败、输出超限、超时、客户端异常都经过内层 `finally`，执行限时限输出的 `docker rm -f <本次唯一容器名>` 并核验退出回执，而不依赖不可审计的 `--rm`。
 
-结果用 `cleanup_attempted`、`cleanup_verified`、`cleanup_error` 记录状态；清理命令同样限时、限输出。如果业务测试通过但清理未确认，工具将 `ok` 改为 false，返回 `sandbox_cleanup_failed`，并保留原执行结论。若早在快照或镜像检查阶段失败、尚未尝试创建容器，`cleanup_attempted=false`；不能仅凭初始 `cleanup_verified=true` 声称“执行后容器已删除”。
+清理状态以 `cleanup_attempted`、`cleanup_verified`、`cleanup_error` 精细落盘，并在宿主临时快照目录回收时遵守**原始结论保留原则**：
+- 若容器测试已通过，但 `docker rm -f` 未确认，或外层 `finally` 执行 `shutil.rmtree(temporary)` 遭遇内核挂载繁忙（如 `EBUSY`）等 `OSError` 时，`_record_rmtree_failure()` 会将 `cleanup_verified` 置为 `false`，写入 `cleanup_error`（例如 `rmtree_EBUSY`），把原本的 `"passed"` 保存在 `execution_code="passed"` 字段中，再将顶层 `ok` 降级为 `false`、`code` 置为 `"sandbox_cleanup_failed"`——既拒绝在资源泄漏时静默报绿，又不掩盖业务代码本身通过测试的事实；若测试原本已失败（如 `tests_failed` 或 `sandbox_timeout`），则保留原失败 `code` 仅补充 `cleanup_error`，绝不用清理异常冲掉真正的故障根因。
+- 当宿主进程遭遇 `SIGKILL`、掉电或极端崩溃导致 `finally` 未能跑完时，独立巡检入口 `reap_orphan_containers(now_ts)`（集成于 `agent-lab gc` 与后台维护任务）会按 `--filter label=agent-lab.managed=1` 扫描容器、读取 `agent-lab.expires-at` 标签，仅对已到期的孤儿容器执行强制 `docker rm -f`，不会误删同机其他服务或仍在租期内的合法容器。
 
-进程被强制终止、主机掉电或 Docker daemon 完全失联时，finally 不一定能完成。生产执行服务还需独立清理器，按受控标签/容器 ID 对照任务状态处理遗留资源，避免误删其他任务的容器。当前 finally 清理与可观测字段不能代替跨重启的资源回收系统。
+## 5. 双进程防伪回执、测试套件兼容与统一错误码体系
 
-## 5. 退出码 0、测试通过和“恶意代码可信”是三件事
+### 5.1 双进程 Supervisor + Child Runner 防伪回执架构
 
-基础判断至少区分：没有启动、基础设施错误、业务测试失败、正常测试完成、超时、输出超限、执行结果未知与清理异常。Docker 的启动错误不能显示成业务测试失败；Docker 不可用不能自动退回宿主执行后仍声称隔离测试通过。
+在早期单进程驱动设计中，待测业务代码与回执打印逻辑共处同一个 Python 解释器：恶意补丁只需遍历调用栈读取一次性 `marker` 字符串，直接向 `stdout` 伪造一行合法 JSON 并调用 `os._exit(0)`，即可在未通过真实断言的情况下欺骗宿主判定 `passed`。为此，`sandbox.py` 采用容器内**双进程隔离与 HMAC 签名回执架构**（`_build_supervisor_driver` + `_CHILD_PREAMBLE`）：
 
-退出码 0 可能来自“程序提前 `sys.exit(0)`”，不代表预期测试真的跑完。本项目使用固定 driver，只发现受保护的 `test_pricing.py`；预期恰好 4 个测试，要求无 skip。`python -I -B -c` 先导入标准库、再加入工作区，降低工作区 `json.py` / `unittest.py` 直接遮蔽 driver 标准库的风险。
+1. **PID 1 纯标准库 Supervisor 隔离秘密**：容器入口 `python -I -B -c` 运行外层 Supervisor，它持有本次随机生成的 `AGENT_LAB_RECEIPT_<hex>:` 前缀与 `os.urandom(32)` 随机密钥，**全程绝不将 `/workspace` 加入 `sys.path`，也不导入任何待测文件**。
+2. **匿名管道与一次性闭环密钥传递**：Supervisor 创建匿名管道 `r_fd, w_fd = os.pipe()`，以 `start_new_session=True`、`pass_fds=(w_fd,)` 启动独立进程组的 Child Runner，并通过 `child.stdin` 写入 32 字节随机 HMAC 密钥后立即 `close()`；Child 在导入任何工作区模块之前从 `sys.stdin.buffer.read(32)` 读取密钥并立即关闭 `stdin`，把密钥闭包绑定进一次性 `_send(receipt)` 函数后随即 `del key, _bind_sender` 清除局部变量引用。
+3. **流式欺骗前缀清洗（Spoof Scrubbing）**：Supervisor 通过 `selectors` 同时监听 `child.stdout` 与 `r_fd`，对子进程标准输出做跨分块滑动窗口扫描（保留尾部最多 `len(_needle) - 1` 字节处理分包边界），将子进程试图打印的任何 `AGENT_LAB_RECEIPT_` 字面量实时替换为 `[SPOOF_BLOCKED_RECEIPT_]`。唯有经匿名管道 `w_fd` 传回且通过常量时间 `hmac.compare_digest`（HMAC-SHA256）校验的唯一回执包，才由 Supervisor 向容器 stdout 输出真正的 `marker + json`。
+4. **内层 `sys.addaudithook` 运行时内省阻断**：Child 在进入 `/workspace` 前挂载 Python 审计钩子 `_audit`，显式拦截 `ctypes` / `_ctypes` 导入与调用、`gc.get_objects` / `gc.get_referrers` / `gc.get_referents` 全堆扫描，以及非标准库代码或经由 `inspect.py` 发起的 `sys._getframe`（含针对 `<string>` 驱动栈帧的探测），阻断纯 Python 层面的闭包密钥窃取。
+5. **容器内独立墙钟看门狗（Inner Watchdog）**：Supervisor 维护单调时钟 `inner_timeout`（`timeout_seconds + 2.0` 秒）；一旦子进程挂起或后台孙进程阻塞管道到期，立即对整个子进程组执行 `os.killpg(child.pid, signal.SIGKILL)` 并以退出码 `124` 退出；若子进程被信号杀死（如 OOM `SIGKILL`），则按 `128 + signal`（`137`）透传退出码。
 
-driver 输出一次性标记后的 JSON 回执；宿主 `_receipt()` 检查字段类型、测试数、skip、失败/错误数、successful 与退出码的一致性，再给出 passed / tests_failed。缺失或不一致的回执返回 `sandbox_incomplete`。超时、输出超限与无法确认执行完成时，`tests_executed=null`，不能解释成“确定未执行”；启动前失败才使用 false，收到完整有效回执使用 true。这里的回执用于识别普通失败和意外提前退出，不是不可伪造的认证。
+**诚实安全边界**：双进程 HMAC + `sys.addaudithook` 大幅提高了纯 Python 待测代码伪造测试回执的门槛，但它**不是内核级或硬件虚拟化边界**。一方面，同 UID（`65534:65534`）的子进程若借助容器内原生二进制工具或内核漏洞操作同用户进程，或在同一 Child 解释器内精巧篡改目标业务模块行为以迎合已知断言，单靠 Python 审计钩子无法绝对根除；另一方面，容器仍共享宿主机（或 Docker Desktop VM）的 Linux 内核，若面对公网任意不可信机器码或高危多租户负载，仍需结合独立外部黑盒测试验证器以及 gVisor / Firecracker MicroVM 等更强隔离层。
 
-更强的限制必须明确：受测模块与 unittest 若在同一个 Python 解释器里，恶意代码可能 monkeypatch unittest、伪造输出或直接操纵回执渠道。测试文件哈希未改变只证明原文件没有被替换，不证明测试框架运行时没有被篡改；要求“恰好 4 个测试”的回执也不是恶意代码不可伪造的证明。
+### 5.2 纯标准库容器内的 Pytest 风格函数与异步测试兼容
 
-因此本项目把测试结果作为教学样例的验证证据，不能宣称已经实现对任意恶意代码的可信业务判定。需要更强威胁模型时，应设计独立可信验证器与窄协议，把验证凭证、结果签名能力和外部期望留在待测进程之外，并针对作弊路径做对抗测试。仅更换容器 runtime 不会自动解决“受测进程自己证明自己正确”的问题。
+受限测试容器固定使用无第三方包的 `python:3.12-slim`，但真实工程仓库普遍采用顶层 `def test_*()`、`async def test_*()` 或不继承 `unittest.TestCase` 的 `class Test*:`。为此，`sandbox.py` 在宿主静态校验与容器动态加载两端保持严格对齐：
+- **宿主端零执行静态计数（`discover_test_oracles`）**：仅用 `ast.parse` 解析 `tests/` 下全部 `test*.py`，同时统计 `TestCase`/`Test*` 类中的 `test*` 方法与模块顶层 `def test_*` / `async def test_*` 函数总数，并记录每个测试文件的 SHA-256，全程绝不 `import` 待测代码。
+- **容器端动态包装执行（`_SuiteLoader`）**：继承 `unittest.TestLoader`，对模块自定义顶层 `test_*` 函数与非 `TestCase` 子类的 `Test*` 方法自动封装为 `unittest.FunctionTestCase`（协程函数与异步方法自动由 `asyncio.run()` 驱动），确保预期测试数 `expected_tests` 与实际运行数 `tests_run` 精确闭环、零 skip 方可判过。
+
+### 5.3 规范错误码分流：对齐 `AgentRuntime` 修复回环与 `model_evals` 评测分母
+
+沙盒将非通过状态严格划分为两个互斥常量集合，供运行时修复状态机与离线基准评测共享同一语义契约：
+
+| 常量集合 / 状态 | 包含的规范 `code` | `AgentRuntime` 修复回环行为 | `model_evals` 统计归类与 `pass_rate_valid` 分母 |
+| --- | --- | --- | --- |
+| `passed` | `passed`（且 `tests_executed=True`） | `verification.status="passed"`；若启用 `commit_on_pass` 则校验 `epoch` 后自动创建 Git commit 并推进 `base_commit` | 计入 `passed_runs` 与 `valid_runs`（分子、分母均 +1） |
+| `SANDBOX_FAILURE_CODES` | `tests_failed`, `no_tests_ran`, `test_count_mismatch`, `timeout`, `sandbox_timeout`, `sandbox_output_limit`, `sandbox_incomplete`, `sandbox_oom`, `sandbox_snapshot_limit`, `unsafe_workspace`, `test_oracle_modified` | 判定为代码/补丁导致的可归责失败：`verification.status="failed"`，回传剩余 `repair_budget` 驱动模型在 `max_repair_rounds` 预算内自动修复；当容器退出码为 `137` 时在 `sandbox_incomplete` 上额外标注 `oom_killed=True, failure_reason="oom_killed"` | 归为 `outcome="model_failure"`，**计入 `valid_runs` 分母**（防止模型写出死循环、OOM 或刷爆日志反而逃避失分） |
+| `SANDBOX_INFRA_CODES` | `sandbox_unavailable`, `image_missing`, `daemon_error`, `sandbox_error`, `sandbox_cleanup_failed` | 判定为环境/守护进程异常：`verification.status="unavailable"`，**不消耗也不惩罚模型的修复轮次** | 归为 `outcome="infrastructure_failure"`，**从 `valid_runs = total_runs - infrastructure_failures` 分母中剔除**（无有效样本时 `pass_rate_valid=None`），既不混入模型失分，也绝不冒充通过 |
 
 ## 6. Docker、gVisor 与 Firecracker 的边界
 
@@ -185,43 +206,43 @@ Linux CI 可以执行真实 Docker；本地没有 Docker 时保留明确 `sandbo
 
 ### 83. P0：为什么复制源码快照，并固定 image ID，而不直接挂载仓库和镜像 tag？
 
-**回答要点：** 活目录可能在执行期间变化，也可能包含凭证和不需要的文件；受限副本降低暴露面并固定本次输入。tag 可变，inspect 后按同一 image ID 启动，记录源码/测试/镜像版本。快照不是多文件事务，镜像固定也不是供应链安全认证。
+**回答要点：** 活目录可能在执行期间变化，也可能包含凭证和不需要的文件；受限副本降低暴露面并固定本次输入。套件快照仅白名单放行 `.py` 与 `tests/` 下非秘密数据夹具（`.json`/`.yaml`/`.toml`/`.txt`/`.csv`），并自动支持 `src/` 包布局。tag 可变，inspect 后按同一 image ID 启动，记录源码/测试/镜像版本。快照不是多文件事务，镜像固定也不是供应链安全认证。
 
 **追问：** symlink 与 hardlink 有什么风险？普通 Python 文件中硬编码的密钥能被文件名过滤拦住吗？如何处理复制期间修改？
 
-**代码证据：** [sandbox.py](../src/agent_lab/sandbox.py) 的 `_snapshot` / `_open_root` 与 `run` 中的 image ID 解析。项目只复制教学测试所需 Python 文件，通用多语言构建快照是扩展方向。
+**代码证据：** [sandbox.py](../src/agent_lab/sandbox.py) 的 `_snapshot` / `_snapshot_suite` / `_open_root` 与 `run` / `run_suite` 中的 image ID 解析。通用多语言编译产物快照仍是扩展方向。
 
 ### 84. P0：恶意程序持续打印日志，如何避免宿主被拖垮？
 
-**回答要点：** 不能只截断最终展示，更不能无界 capture。持续有界读取，超过总输出量就终止；处理无换行输出、stderr 管道阻塞与解码；限制 Docker daemon 日志，并在结束后清理。日志内容仍是不可信输入。
+**回答要点：** 不能只截断最终展示，更不能无界 capture。持续有界读取，超过总输出量就终止；处理无换行输出、stderr 管道阻塞与解码；限制 Docker daemon 日志，并用信号量约束单机沙盒并发数，结束后强制清理。日志内容仍是不可信输入。
 
 **追问：** 输出写临时文件再读前 16 KB，为什么仍有磁盘 DoS？如果 stdout 不断输出且从不换行，`readline()` 有什么问题？
 
-**代码证据：** [sandbox.py](../src/agent_lab/sandbox.py) 的 `_capture`、`SandboxPolicy.output_limit_bytes` 与 `_LIMIT_FLAGS`。参数单测不能替代真实超量输出探针，项目未实现跨任务全局日志配额服务。
+**代码证据：** [sandbox.py](../src/agent_lab/sandbox.py) 的 `_capture`、`SandboxPolicy.output_limit_bytes`、`_SANDBOX_SEMAPHORE` 与 `_LIMIT_FLAGS`。参数单测不能替代真实超量输出探针，项目未实现跨任务全局日志配额服务。
 
 ### 85. P0：超时时 kill docker CLI 为什么不够？执行状态应该怎么记？
 
-**回答要点：** Docker daemon 可能仍在运行容器，必须针对唯一容器名/ID 强制删除，清理本身要限时并记录结果。超时不代表业务代码从未执行，协程取消也不等于同步线程停止；工具中断无法核对时应保留 unknown，不能伪报成功或盲目自动重跑。
+**回答要点：** Docker daemon 可能仍在运行容器，必须针对唯一容器名/ID 强制删除，清理本身要限时并记录结果；若宿主进程被强杀，还需基于容器标签与过期时间戳回收孤儿容器；若快照目录清理遇到 `EBUSY`，应降级为 `sandbox_cleanup_failed` 同时用 `execution_code` 保留原始执行结论。超时不代表业务代码从未执行，工具中断无法核对时应保留 unknown，不能伪报成功或盲目自动重跑。
 
 **追问：** finally 执行失败怎么办？进程 SIGKILL 后谁清理？取消和回滚有什么区别？
 
-**代码证据：** [sandbox.py](../src/agent_lab/sandbox.py) 的 finally 清理；[runtime.py](../src/agent_lab/runtime.py) 的 `_tool_thread`、安全恢复列表与 unknown 分支；[storage.py](../src/agent_lab/storage.py) 的调用账本。项目未实现跨重启的独立容器清理服务。
+**代码证据：** [sandbox.py](../src/agent_lab/sandbox.py) 的 finally 清理、`agent-lab.managed=1` / `agent-lab.expires-at` 标签、`reap_orphan_containers()` 与 `_record_rmtree_failure()`；[runtime.py](../src/agent_lab/runtime.py) 的 `_tool_thread` 与 unknown 分支；[storage.py](../src/agent_lab/storage.py) 的调用账本。
 
 ### 86. P0：退出码 0 就能声称业务测试通过吗？测试文件哈希能防作弊吗？
 
-**回答要点：** 退出码只是一项证据，要核对预期测试入口、完成回执、数量、失败/错误数和环境。提前 `sys.exit(0)` 可能没执行测试；文件哈希只防测试文件被替换，同进程恶意模块仍能 monkeypatch 框架或伪造输出。健壮性回执与对抗恶意代码的可信验证是不同能力。
+**回答要点：** 退出码只是一项证据，要核对预期测试入口、完成回执、数量、失败/错误数和环境。提前 `sys.exit(0)` 可能没执行测试；文件哈希只防测试文件被替换，单进程共享解释器下恶意模块可探测栈帧或伪造 stdout。容器内采用外层纯标准库 Supervisor + 内层 Child 双进程架构、32 字节一次性 HMAC 匿名管道回执、stdout `[SPOOF_BLOCKED_RECEIPT_]` 清洗与 `sys.addaudithook` 阻断 `sys._getframe`/`ctypes`/`gc`，显著收紧纯 Python 伪造面，但仍不等同于硬件级或独立外部黑盒裁判。
 
-**追问：** 把预期测试数量设为 4 能解决伪造吗？如果验证器和待测代码共享解释器，信任边界在哪里？
+**追问：** 把预期测试数量设为 4 能解决伪造吗？双进程 HMAC 回执解决了什么、仍有什么内核或同进程边界？
 
-**代码证据：** [tools.py](../src/agent_lab/tools.py) 的受保护测试哈希检查、[sandbox.py](../src/agent_lab/sandbox.py) 的 `_DRIVER` / `_receipt` 与结果分类、[sandbox_smoke.py](../scripts/sandbox_smoke.py) 的原始失败/修复通过对照。项目没有宣称已经建立恶意代码不可伪造的业务结果证明。
+**代码证据：** [tools.py](../src/agent_lab/tools.py) 的受保护测试哈希检查、[sandbox.py](../src/agent_lab/sandbox.py) 的 `_build_supervisor_driver` / `_CHILD_PREAMBLE` / `discover_test_oracles` / `_receipt` 以及 `SANDBOX_FAILURE_CODES` vs `SANDBOX_INFRA_CODES` 分类、[sandbox_smoke.py](../scripts/sandbox_smoke.py) 的原始失败/修复通过对照。
 
-### 87. P1：容器、gVisor 与 microVM 怎么选？Docker 算安全边界吗？
+### 87. P1：容器、gVisor 与 microVM 怎么选？应用自身容器化时怎么避免挂载 Docker Socket？
 
-**回答要点：** Docker 容器共享运行环境的 Linux 内核，靠 namespace、cgroup、权限与 seccomp 收缩；gVisor 引入用户态应用内核，microVM 引入虚拟化与客户机内核。需要按威胁模型、兼容性、启动/运行成本和宿主运维评估，不用一个性能数字代替隔离审计。
+**回答要点：** Docker 容器共享运行环境的 Linux 内核，靠 namespace、cgroup、权限与 seccomp 收缩；gVisor 引入用户态应用内核，microVM 引入虚拟化与客户机内核。此外，当 Agent 控制面自身部署在容器内时，绝不能把宿主机 `/var/run/docker.sock` 挂给 API 容器，而应通过窄协议 HTTP 将脱敏快照发往独立受管沙盒池执行。
 
-**追问：** rootless Docker 是否自动解决内核漏洞？换成 Firecracker 后，凭证、结果伪造与网络出口问题是否自然消失？
+**追问：** rootless Docker 是否自动解决内核漏洞？为什么挂载 `docker.sock` 等同交出宿主机 root？
 
-**代码证据：** 项目实际使用 [sandbox.py](../src/agent_lab/sandbox.py) 的 Docker 约束；gVisor / Firecracker 仅为本节引用官方资料的设计延伸，未集成、未做性能比较。
+**代码证据：** 项目使用 [sandbox.py](../src/agent_lab/sandbox.py) 的本地 Docker 约束与解耦的 `RemoteHTTPSandboxBackend`（对接 [api.py](../src/agent_lab/api.py) 的 `/api/internal/sandbox/execute`）；gVisor / Firecracker 仍为设计延伸，未集成或实测。
 
 ### 88. P1：Agent 要访问私有仓库，怎样让它完成任务又不直接拿到长期 Git token？
 

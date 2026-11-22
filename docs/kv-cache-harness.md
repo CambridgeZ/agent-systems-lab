@@ -82,16 +82,16 @@ flowchart LR
 
 ---
 
-## 3. 本项目落地的 6 项 Harness 优化详解
+## 3. 本项目落地的 7 项 Harness 优化详解
 
-围绕上述原理，我们在 [`kv_cache.py`](../src/agent_lab/kv_cache.py)、[`context.py`](../src/agent_lab/context.py)、[`runtime.py`](../src/agent_lab/runtime.py)、[`working_memory.py`](../src/agent_lab/working_memory.py) 与 [`providers.py`](../src/agent_lab/providers.py) 中排查并修复了 5 类典型的缓存破坏模式，形成了 6 项可验证机制。
+围绕上述原理，我们在 [`kv_cache.py`](../src/agent_lab/kv_cache.py)、[`context.py`](../src/agent_lab/context.py)、[`runtime.py`](../src/agent_lab/runtime.py)、[`working_memory.py`](../src/agent_lab/working_memory.py) 与 [`providers.py`](../src/agent_lab/providers.py) 中排查并修复了典型的缓存破坏与异构网关兼容问题，形成了 7 项可验证机制。
 
 ### 3.1 瞬态尾部状态注入（Tail Transient State Injection）
 
 - **优化前的问题**：旧版 `AgentRuntime._pinned()` 把包含当前步数 `step`、最近 6 次调用摘要 `recent_calls` 的 `HARNESS_STATE`，以及包含最新事实的 `WORKING_MEMORY`，全部插在 `messages[1]`（紧跟原任务之后、所有历史工具对话之前）。由于 `step` 和 `recent_calls` **每一轮必定改变**，`messages[2:]` 中积累的上万字符代码读取与测试输出在每一轮都会从第 2 条消息处整体失效。
 - **优化后的机制**：
-  - [`ContextManager.build()`](../src/agent_lab/context.py) 新增 `tail_state` 参数，组装顺序改为 `[原任务, *pinned(低频技能快照), *保留历史消息组, *tail_state]`，且 `tail_state` 的 JSON 字节开销与外层标点一并计入严格预算校验。
-  - [`AgentRuntime._pinned()`](../src/agent_lab/runtime.py) 仅保留任务内极少变动的 `SKILL_SNAPSHOT`；高频变化的 `HARNESS_STATE` 与 `WORKING_MEMORY` 移至 [`AgentRuntime._tail_state()`](../src/agent_lab/runtime.py) 追加在最末尾。
+  - [`ContextManager.build()`](../src/agent_lab/context.py) 新增 `tail_state` 参数，组装顺序改为 `[原任务, *pinned(首轮预设技能快照), *保留历史消息组, *tail_state]`，且 `tail_state` 的 JSON 字节开销与外层标点一并计入严格预算校验。
+  - [`AgentRuntime._complete()`](../src/agent_lab/runtime.py) 仅将首轮启动前已固定的技能留在 `pinned`，而把运行中途动态加载的技能（`mid_run_dynamic=True`）、高频变化的 `HARNESS_STATE` 与 `WORKING_MEMORY` 统一汇入 `tail_state` 追加在最末尾。
   - 结果：在未触发窗口溢出的任意连续轮次中，稳定前缀 `messages[:-len(tail_state)]` 实现 **100% 字节级只追加（Append-Only）**，同时 `HARNESS_STATE` 位于最末尾反而受益于近因效应（Recency Bias），模型对最新审批与验证状态的遵循更稳定。
 
 ### 3.2 确定性紧凑序列化与跨任务目录稳定对齐
@@ -121,8 +121,8 @@ flowchart TD
     D --> E["持久化新游标 cursor' = dropped_groups<br/>仅本步重算一次，换取后续多步连续命中"]
 ```
 
-- **附：为什么未满窗口时频繁调用 `skill_unload` 可能是“负优化”？**
-  假设前置 `SKILL_SNAPSHOT` 占 $500$ tokens，其后已积累 $15{,}000$ tokens 对话历史。若此时卸载该技能，表面上省了 $500$ tokens 空间，却导致后方 $15{,}000$ tokens 位置下标左移而全部脱离 `0.1x` 缓存（等效损失 $15{,}000 \times 0.9 = 13{,}500$ 未缓存计费单位，远大于省下的 $500 \times 0.1 = 50$ 单位）。因此工程上应当**优先按章节精确 `skill_load`，仅在上下文逼近预算上限时才调用 `skill_unload`**。
+- **附：前置 `pinned` 技能与运行期动态技能的位置权衡**
+  若技能在首轮启动前即作为前置 `pinned` 插入在 `messages[1]`，中途对其调用 `skill_unload` 会令后方已积累的 $15{,}000$ tokens 对话历史位置下标左移而全部脱离 `0.1x` 缓存。为此，本项目在 3.7 节进一步引入了 `mid_run_dynamic` 尾部路由：仅首轮预设技能置于 `pinned`（工程上不宜中途卸载），而对话进行中按需 `skill_load` / `skill_unload` 的技能全部挂载于 `tail_state`，彻底消除中途切技能对历史缓存的破坏。
 
 ### 3.4 多子代理根前缀共享与执行层权限解耦
 
@@ -140,18 +140,36 @@ flowchart TD
   - 严格遵守单请求最多 4 个 `cache_control` 断点的限制，精确布置 **3 处 `{"type": "ephemeral"}` 断点**：
     1. `tools[-1]`：固定整套工具定义缓存；
     2. `system[0]`（`split_system_role` 切出的共享基础系统提示）：主从 Agent 共享系统缓存，尾部 `ROLE:` 块不打断点以免浪费配额；
-    3. **尾部瞬态状态之前的最后一个稳定历史内容块**：让每一步新增的 `tool_use + tool_result` 滚动推进缓存边界，而每步变化的 `HARNESS_STATE / WORKING_MEMORY` 留在断点之外。
+    3. **尾部瞬态状态之前的最后一个可缓存稳定历史块**：让每一步新增的 `tool_use + tool_result` 滚动推进缓存边界，而每步变化的 `tail_state` 留在断点之外。
   - **自动合并相邻 `user` 消息**：当历史最后一条是 `user(tool_result)`、紧接着又是 `user(HARNESS_STATE)` 时，自动合并为单条 `user` 消息的多个内容块，既满足 Anthropic 严格的 `user / assistant` 角色交替约束，又保持精确到内容块级别的断点位置。
 - **OpenAI 兼容 Chat Completions API（[`OpenAICompatibleProvider`](../src/agent_lab/providers.py)）**：
   - 自动附带 `prompt_cache_key = run["id"]`，帮助负载均衡器把同一任务的连续轮次路由至持有该前缀 KV 块的推理实例；
   - 自动解析响应中的 `usage.prompt_tokens_details.cached_tokens`（以及 Anthropic 的 `cache_read_input_tokens` / `cache_creation_input_tokens`），统一汇入 `run.metadata.kv_cache`。
 
-### 3.6 链式块哈希追踪器与实时可观测性
+### 3.6 根前缀锁定的 LRU 链式块追踪器与实时可观测性
 
 为了在没有外部 API 密钥的本机学习环境与离线评测中也能定量诊断缓存友好度，[`kv_cache.py`](../src/agent_lab/kv_cache.py) 实现了 `record_kv_step()`：
 
 - 默认按 `DEFAULT_BLOCK_CHARS = 64`（约对应 16—20 个源码/JSON tokens，贴近 vLLM 默认 16-token 块粒度）计算链式 SHA-256 块哈希，记录每一步的命中块数、未命中字符数、单步命中率 `step_hit_rate` 与累计命中率 `cumulative_hit_rate`；
+- **根前缀锁定 LRU 驱逐（`_MAX_TRACKED_BLOCKS = 2048`、`_PINNED_ROOT_BLOCKS = 128`）**：每步命中的旧块与新增块一并提升至 MRU 尾部；当累计追踪块数超过 `2048` 时，不再做朴素 FIFO 截断，而是**始终锁定前 `min(128, len(hashes))` 个根前缀块（即 `<TOOLS> + <SYSTEM_BASE>`）**，仅驱逐最久未访问的非根历史块，避免超长对话或多子代理轮转把最宝贵的共享根块挤出追踪池；
 - 通过 `model_start` / `model_end` 事件、`GET /api/runs/{run_id}` 的 `kv_cache` 字段、网页工作台的 `EPOCH / KV 缓存 / TOKENS` 指标栏以及 `uv run agent-lab kv-benchmark` 直接暴露。
+
+### 3.7 运行期动态技能尾置、Thinking 块兼容与异构网关计费/降级加固
+
+在真实长任务与第三方推理网关压测中，我们进一步补齐了四项生产级细节：
+
+1. **运行期动态 `skill_load` / `skill_unload` 路由至 `tail_state`（`mid_run_dynamic`）**：
+   - 当对话已进入多轮交互（`len(run["messages"]) > 1`）后调用 `skill_load` 时，[`AgentRuntime._invoke()`](../src/agent_lab/runtime.py) 为该快照打上内部标记 `mid_run_dynamic=True`；
+   - `_complete()` 在组装上下文时将 `mid_run_dynamic=True` 的技能快照剥离内部标记后放入 `tail_state`（位于所有已提交历史消息之后、Anthropic 第 3 个缓存断点之外），而不是插入前部 `pinned`。因此**中途按需加载新技能或调用 `skill_unload` 卸载该技能时，此前所有轮次积累的历史对话 KV Cache 保持 100% 字节零偏移命中**。
+2. **Anthropic Extended Thinking（`thinking` / `redacted_thinking`）块兼容与安全断点回退**：
+   - Anthropic 协议禁止在 `thinking` 或 `redacted_thinking` 内容块上放置 `cache_control`（会直接触发 400 错误），且要求启用扩展思考时 `budget_tokens < max_tokens`；
+   - [`build_anthropic_cached_payload()`](../src/agent_lab/kv_cache.py) 自动剥离 `_NON_CACHEABLE_BLOCK_TYPES = {"thinking", "redacted_thinking"}` 上的任何缓存标记，并在布置第 3 处历史断点时向前回溯，直到定位最近的可缓存 `text` / `tool_use` / `tool_result` 块；[`AnthropicProvider.complete()`](../src/agent_lab/providers.py) 同时自动钳制 `thinking.budget_tokens` 并保留 `signature` / `data` 供多轮工具续传。
+3. **全口径缓存计费折算（`compute_usage_totals`）与并发在途 Token 预留**：
+   - Anthropic 响应的 `input_tokens` 仅统计断点之后的未命中尾部，必须加上 `cache_creation_input_tokens` 与 `cache_read_input_tokens` 才是真实上下文总输入，且首次建缓存（Cache Creation）按 **`1.25x`** 溢价计费；OpenAI 的 `prompt_tokens` 则已包含 `cached_tokens`；
+   - [`compute_usage_totals()`](../src/agent_lab/providers.py) 统一归一化总输入与加权计费 `billed_input_tokens`（Anthropic `1.25x` 写入 + `0.10x` 读取，OpenAI `0.25x` 读取），在 `AgentRuntime._complete()` 中以 `max(input + output, billed_tokens)` 强制执行 `max_tokens` 预算上限；同时在并行子代理发起请求前，通过 `_budget_lock` 下的 `_inflight_reserved_tokens`（基于 `estimate_bpe_tokens`）与 [`ProviderRateLimiter`](../src/agent_lab/providers.py) 滑动窗口 `reserve() / record_actual()` 预占在途配额，防止并发请求同时击穿预算或 TPM 限流。
+4. **OpenAI 连续 `user` 消息合并（vLLM / SGLang 严格交替）与 `prompt_cache_key` 400/422 自动降级**：
+   - 部分开源推理引擎（vLLM、SGLang 的严格 Jinja Chat Template）在遇到连续两条 `role="user"` 消息（例如 `pinned` 技能快照、`tail_state` 或截断续写提示相邻）时会报模板校验错误。[`OpenAICompatibleProvider._to_openai_messages()`](../src/agent_lab/providers.py) 先紧贴 `assistant.tool_calls` 输出 `role="tool"` 结果并过滤非标准 `thinking` 块，再通过 `_append_user_text()` 将相邻纯文本 `user` 消息自动合并；
+   - 针对严格校验未知顶层字段的兼容网关（如 Mistral、Groq、Together、Fireworks、Cohere、Perplexity），`_should_send_prompt_cache_key()` 预先按域名跳过注入 `prompt_cache_key`；对未知自定义网关，一旦首次请求因携带 `prompt_cache_key` 返回 HTTP `400` 或 `422`，`_post_with_resilience()` 会立即将该实例标记为 `_supports_prompt_cache_key = False`，自动剔除该字段并无缝重试。
 
 ---
 

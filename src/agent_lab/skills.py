@@ -19,6 +19,7 @@ class SkillCatalog:
     MAX_HEADER_BYTES = 4096
     MAX_CATALOG = 32
     CACHE_ENTRIES = 32
+    _CLOSING_FRONTMATTER = re.compile(r"\r?\n---(?:\r?\n|$)")
 
     def __init__(self, directory: str | Path):
         self.directory = Path(directory).resolve()
@@ -60,6 +61,24 @@ class SkillCatalog:
             self._text_cache.popitem(last=False)
         return text
 
+    @classmethod
+    def _frontmatter_bounds(
+        cls,
+        text: str,
+        *,
+        missing_end_message: str = "Skill 元数据缺少结束标记",
+    ) -> tuple[int, int, int]:
+        if text.startswith("---\n"):
+            content_start = 4
+        elif text.startswith("---\r\n"):
+            content_start = 5
+        else:
+            raise ValueError("SKILL.md 缺少 name/description 元数据")
+        match = cls._CLOSING_FRONTMATTER.search(text, 3)
+        if match is None:
+            raise ValueError(missing_end_message)
+        return content_start, match.start(), match.end()
+
     def _header(self, name: str) -> dict:
         """目录阶段只读取有界 frontmatter，避免每轮扫描所有 Skill 正文。"""
         path, signature = self._signature(name)
@@ -67,12 +86,15 @@ class SkillCatalog:
         if cached and cached[0] == signature:
             return dict(cached[1])
         with path.open("rb") as handle:
-            header = handle.read(self.MAX_HEADER_BYTES).decode("utf-8", errors="ignore")
+            raw_header = handle.read(self.MAX_HEADER_BYTES)
+        header = raw_header.decode("utf-8", errors="ignore")
         # 只将元数据结束标记之前的部分交给解析器，不缓存或暴露正文。
-        end = header.find("\n---", 4)
-        if end == -1:
+        _, _, header_end = self._frontmatter_bounds(
+            header, missing_end_message="Skill 元数据缺少有界结束标记"
+        )
+        if len(raw_header) == self.MAX_HEADER_BYTES and not header[:header_end].endswith(("\n", "\r")):
             raise ValueError("Skill 元数据缺少有界结束标记")
-        metadata = self._metadata(header[: end + 4], name)
+        metadata = self._metadata(header[:header_end], name)
         if self._signature(name)[1] != signature:
             raise ValueError("Skill 元数据在读取期间发生变化")
         if len(self._metadata_cache) >= self.CACHE_ENTRIES:
@@ -82,13 +104,9 @@ class SkillCatalog:
 
     @staticmethod
     def _metadata(text: str, folder: str) -> dict:
-        if not text.startswith("---\n"):
-            raise ValueError("SKILL.md 缺少 name/description 元数据")
-        end = text.find("\n---", 4)
-        if end == -1:
-            raise ValueError("Skill 元数据缺少结束标记")
+        content_start, content_end, _ = SkillCatalog._frontmatter_bounds(text)
         metadata: dict[str, str] = {}
-        for line in text[4:end].splitlines():
+        for line in text[content_start:content_end].splitlines():
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             key, separator, value = line.partition(":")
@@ -109,8 +127,8 @@ class SkillCatalog:
 
     def catalog(self) -> list[dict]:
         """返回元数据，不向模型预载正文；损坏的 Skill 不进入可用目录。"""
-        result = []
-        if not self.directory.is_dir():
+        result: list[dict] = []
+        if not self.directory.is_dir() or self.MAX_CATALOG <= 0:
             return result
         for folder in sorted(self.directory.iterdir()):
             if not folder.is_dir() or folder.is_symlink():
@@ -124,6 +142,42 @@ class SkillCatalog:
                 break
         return result
 
+    def catalog_status(self) -> dict:
+        """返回目录元数据及截断/跳过诊断信息，避免超过上限或损坏时静默截断。"""
+        skills: list[dict] = []
+        total_discovered = 0
+        invalid_skipped: list[str] = []
+        max_catalog = max(0, self.MAX_CATALOG)
+        if not self.directory.is_dir():
+            return {
+                "skills": skills,
+                "total_discovered": 0,
+                "truncated": False,
+                "invalid_skipped": invalid_skipped,
+                "max_catalog": self.MAX_CATALOG,
+            }
+        for entry in sorted(self.directory.iterdir()):
+            if entry.is_symlink():
+                invalid_skipped.append(entry.name)
+                continue
+            if not entry.is_dir():
+                continue
+            try:
+                metadata = self._header(entry.name)
+            except (ValueError, UnicodeError, OSError):
+                invalid_skipped.append(entry.name)
+                continue
+            total_discovered += 1
+            if len(skills) < max_catalog:
+                skills.append(metadata)
+        return {
+            "skills": skills,
+            "total_discovered": total_discovered,
+            "truncated": total_discovered > len(skills),
+            "invalid_skipped": invalid_skipped,
+            "max_catalog": self.MAX_CATALOG,
+        }
+
     def load(self, name: str) -> str:
         """显式按名称加载完整内容；调用方仍须把它放在低于系统策略的信任级别。"""
         text = self._read(name)
@@ -134,7 +188,8 @@ class SkillCatalog:
         """第二层仅返回章节索引和版本；正文由 snapshot 显式选择。"""
         text = self.load(name)
         metadata = self._metadata(text, name)
-        body = text[text.find("\n---", 4) + 4 :].strip()
+        _, _, body_start = self._frontmatter_bounds(text)
+        body = text[body_start:].strip()
         headings = self._headings(body)
         return {
             **metadata,
@@ -146,7 +201,8 @@ class SkillCatalog:
     def snapshot(self, name: str, section: str | None = None) -> dict:
         """读取可固定到一次 run 的不可变快照；可只加载一个 Markdown 章节。"""
         text = self.load(name)
-        body = text[text.find("\n---", 4) + 4 :].strip()
+        _, _, body_start = self._frontmatter_bounds(text)
+        body = text[body_start:].strip()
         if section is not None:
             if not isinstance(section, str) or not section or len(section) > 160:
                 raise ValueError("section 必须是目录里的章节标题")
@@ -179,13 +235,14 @@ class SkillCatalog:
         headings = []
         fence = None
         offset = 0
-        heading = re.compile(r"(#{1,6})[ \t]+(.+?)[ \t]*(?:\r?\n|$)")
+        heading = re.compile(r"(#{1,6})[ \t]+([^\r\n]+?)[ \t]*(?:\r?\n|$)")
         for line in body.splitlines(keepends=True):
             marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
             if marker:
                 token = marker.group(1)
                 if fence is None:
-                    fence = token
+                    if not (token[0] == "`" and "`" in line[marker.end() :]):
+                        fence = token
                 elif token[0] == fence[0] and len(token) >= len(fence) and not line[marker.end() :].strip():
                     fence = None
             elif fence is None:

@@ -4,6 +4,124 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import math
+import os
+import re
+from typing import Any
+
+_MESSAGE_BPE_OVERHEAD = 4
+_CONVERSATION_BPE_OVERHEAD = 2
+
+_BPE_PIECE_RE = re.compile(
+    r"(?P<esc>\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\"\\/bfnrt0']))"
+    r"|(?P<nl>\r\n|[\r\n\t])"
+    r"|(?P<cjk>[㐀-鿿豈-﫿]+)"
+    r"|(?P<word> ?[A-Za-z]+)"
+    r"|(?P<num>[0-9]+)"
+    r"|(?P<sp> +)"
+    r"|(?P<pair>\{\"|\":|\"\}|,\"|\[\{|\}\]|\[\]|\{\}|==|!=|<=|>=|->|\*\*|//|\+=|-=|\(\))"
+    r"|(?P<ascii_punct>[\x00-\x7f])"
+    r"|(?P<mb>[^\x00-\x7f㐀-鿿豈-﫿]+)"
+)
+
+
+def _count_str_bpe_tokens(text: str) -> int:
+    if not text:
+        return 0
+    total = 0.0
+    for match in _BPE_PIECE_RE.finditer(text):
+        kind = match.lastgroup
+        piece = match.group()
+        if kind == "word":
+            letters = len(piece) - (1 if piece[0] == " " else 0)
+            total += (letters + 3) // 4
+        elif kind == "num":
+            total += (len(piece) + 2) // 3
+        elif kind == "cjk":
+            total += len(piece) * 1.5
+        elif kind == "esc":
+            total += 2.0 if len(piece) > 2 else 1.0
+        elif kind == "nl":
+            total += 1.0
+        elif kind == "sp":
+            total += (len(piece) + 3) // 4
+        elif kind in {"pair", "ascii_punct"}:
+            total += 1.0
+        elif kind == "mb":
+            total += len(piece.encode("utf-8")) * 0.5
+    return math.ceil(total)
+
+
+def _is_message_dict(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("role"), str) and "content" in value
+
+
+def _message_bpe_tokens(message: dict[str, Any], *, _str_counter=_count_str_bpe_tokens) -> int:
+    tokens = _MESSAGE_BPE_OVERHEAD + _str_counter(str(message.get("role", "")))
+    content = message.get("content")
+    if isinstance(content, str):
+        tokens += _str_counter(content)
+    elif isinstance(content, list):
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+                and len(block) == 2
+            ):
+                tokens += 2 + _str_counter(block["text"])
+            else:
+                tokens += 3 + _str_counter(
+                    json.dumps(block, ensure_ascii=False, separators=(",", ":"))
+                )
+    elif content is not None:
+        tokens += _str_counter(json.dumps(content, ensure_ascii=False, separators=(",", ":")))
+    for key, val in message.items():
+        if key not in {"role", "content"}:
+            tokens += _str_counter(str(key)) + _str_counter(
+                json.dumps(val, ensure_ascii=False, separators=(",", ":"))
+            )
+    return tokens
+
+
+def estimate_bpe_tokens(value: Any, *, use_tiktoken: bool | None = None) -> int:
+    """确定性、零外部依赖的校准 BPE token 估算器（显式开启且本地可用时支持 tiktoken cl100k_base）。"""
+    opt_in = (
+        os.environ.get("AGENT_LAB_USE_TIKTOKEN") == "1"
+        if use_tiktoken is None
+        else bool(use_tiktoken)
+    )
+    str_counter = _count_str_bpe_tokens
+    if opt_in:
+        try:
+            import tiktoken  # type: ignore[import-not-found]
+
+            enc = tiktoken.get_encoding("cl100k_base")
+
+            def _tiktoken_count(text: str) -> int:
+                return len(enc.encode(text)) if text else 0
+
+            str_counter = _tiktoken_count
+        except Exception:
+            str_counter = _count_str_bpe_tokens
+
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return str_counter(value)
+    if isinstance(value, dict):
+        if _is_message_dict(value):
+            return _message_bpe_tokens(value, _str_counter=str_counter)
+        return str_counter(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    if isinstance(value, list):
+        if not value:
+            return 0
+        if all(_is_message_dict(item) for item in value):
+            return _CONVERSATION_BPE_OVERHEAD + sum(
+                _message_bpe_tokens(item, _str_counter=str_counter) for item in value
+            )
+        return str_counter(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    return str_counter(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
 
 def _blocks(message: dict, kind: str) -> list[dict]:
@@ -40,7 +158,13 @@ class ContextManager:
     这是序列化字符预算，既不包含服务商隐藏包装，也不保证等于真实 token 上限。
     """
 
-    def __init__(self, max_chars: int = 24_000, *, low_watermark_ratio: float = 1.0):
+    def __init__(
+        self,
+        max_chars: int = 24_000,
+        *,
+        low_watermark_ratio: float = 1.0,
+        max_tokens: int | None = None,
+    ):
         if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 1:
             raise ValueError("max_chars 必须是正整数")
         if (
@@ -49,8 +173,13 @@ class ContextManager:
             or not 0.2 <= float(low_watermark_ratio) <= 1.0
         ):
             raise ValueError("low_watermark_ratio 必须在 0.2 到 1.0 之间")
+        if max_tokens is not None and (
+            isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1
+        ):
+            raise ValueError("max_tokens 必须是正整数")
         self.max_chars = max_chars
         self.low_watermark_ratio = float(low_watermark_ratio)
+        self.max_tokens = max_tokens
         self._stats: dict = {}
 
     def _atomic_groups(self, messages: list[dict]) -> list[list[dict]]:
@@ -142,6 +271,7 @@ class ContextManager:
         pinned: list[dict] | None = None,
         tail_state: list[dict] | None = None,
         reserved_chars: int = 0,
+        reserved_tokens: int = 0,
         min_dropped_groups: int = 0,
     ) -> list[dict]:
         """构造预算内的消息副本；原任务与必需内容装不下时显式失败。
@@ -154,6 +284,8 @@ class ContextManager:
         """
         if isinstance(reserved_chars, bool) or not isinstance(reserved_chars, int) or reserved_chars < 0:
             raise ValueError("reserved_chars 必须是非负整数")
+        if isinstance(reserved_tokens, bool) or not isinstance(reserved_tokens, int) or reserved_tokens < 0:
+            raise ValueError("reserved_tokens 必须是非负整数")
         if isinstance(min_dropped_groups, bool) or not isinstance(min_dropped_groups, int) or min_dropped_groups < 0:
             raise ValueError("min_dropped_groups 必须是非负整数")
         if not isinstance(messages, list):
@@ -178,33 +310,87 @@ class ContextManager:
         if groups and len(groups[0]) != 1:
             raise ValueError("首条消息必须是普通 user 任务，不能是工具结果")
         original_size = _size(messages)
+        original_tokens = estimate_bpe_tokens(messages)
         effective_budget = self.max_chars - reserved_chars
+        effective_token_budget = (
+            self.max_tokens - reserved_tokens if self.max_tokens is not None else None
+        )
         pinned_cost = sum(_item_size(message) + 1 for message in pinned)
         pinned_size = _size(pinned) if pinned else 0
+        pinned_token_cost = sum(_message_bpe_tokens(message) for message in pinned)
         tail_state_cost = sum(_item_size(message) + 1 for message in tail_state)
         tail_state_size = _size(tail_state) if tail_state else 0
+        tail_state_token_cost = sum(_message_bpe_tokens(message) for message in tail_state)
         tail = groups[1:]
         # 每条消息多计一个分隔逗号；存在首条任务时，它恰好等于追加各组的字符增量。
         group_costs = [sum(_item_size(message) + 1 for message in group) for group in tail]
+        group_token_costs = [sum(_message_bpe_tokens(message) for message in group) for group in tail]
         start_cursor = min(min_dropped_groups, max(0, len(tail) - 1)) if tail else 0
         dropped_groups = start_cursor
         removed = sum(len(group) for group in tail[:dropped_groups])
         remaining_cost = sum(group_costs[dropped_groups:])
+        remaining_token_cost = sum(group_token_costs[dropped_groups:])
         overflow_triggered = False
         while True:
             first = self._with_notice(messages[0], removed) if messages else None
             fixed_overhead = (2 + _item_size(first) + pinned_cost + tail_state_cost) if first else 2
             candidate_size = fixed_overhead + remaining_cost if first else 2
-            if candidate_size <= effective_budget and overflow_triggered and self.low_watermark_ratio < 1.0:
+            fixed_token_overhead = (
+                (
+                    _CONVERSATION_BPE_OVERHEAD
+                    + _message_bpe_tokens(first)
+                    + pinned_token_cost
+                    + tail_state_token_cost
+                )
+                if first
+                else 0
+            )
+            candidate_tokens = fixed_token_overhead + remaining_token_cost if first else 0
+            fits_chars = candidate_size <= effective_budget
+            fits_tokens = (
+                effective_token_budget is None or candidate_tokens <= effective_token_budget
+            )
+            fits_budget = fits_chars and fits_tokens
+            if fits_budget and overflow_triggered and self.low_watermark_ratio < 1.0:
                 history_capacity = max(0, effective_budget - fixed_overhead)
                 low_target = int(history_capacity * self.low_watermark_ratio)
-                while len(tail) - dropped_groups > 1 and remaining_cost > low_target:
+                low_token_target = (
+                    int(max(0, effective_token_budget - fixed_token_overhead) * self.low_watermark_ratio)
+                    if effective_token_budget is not None
+                    else None
+                )
+                compacted_further = False
+                while len(tail) - dropped_groups > 1 and (
+                    remaining_cost > low_target
+                    or (low_token_target is not None and remaining_token_cost > low_token_target)
+                ):
                     removed += len(tail[dropped_groups])
                     remaining_cost -= group_costs[dropped_groups]
+                    remaining_token_cost -= group_token_costs[dropped_groups]
                     dropped_groups += 1
-                first = self._with_notice(messages[0], removed) if messages else None
-                fixed_overhead = (2 + _item_size(first) + pinned_cost + tail_state_cost) if first else 2
-                candidate_size = fixed_overhead + remaining_cost if first else 2
+                    compacted_further = True
+                if compacted_further:
+                    first = self._with_notice(messages[0], removed) if messages else None
+                    fixed_overhead = (
+                        (2 + _item_size(first) + pinned_cost + tail_state_cost) if first else 2
+                    )
+                    candidate_size = fixed_overhead + remaining_cost if first else 2
+                    fixed_token_overhead = (
+                        (
+                            _CONVERSATION_BPE_OVERHEAD
+                            + _message_bpe_tokens(first)
+                            + pinned_token_cost
+                            + tail_state_token_cost
+                        )
+                        if first
+                        else 0
+                    )
+                    candidate_tokens = fixed_token_overhead + remaining_token_cost if first else 0
+                    fits_chars = candidate_size <= effective_budget
+                    fits_tokens = (
+                        effective_token_budget is None or candidate_tokens <= effective_token_budget
+                    )
+                    fits_budget = fits_chars and fits_tokens
             self._stats = {
                 "original_messages": len(messages),
                 "kept_messages": len(messages) - removed + len(pinned) + len(tail_state),
@@ -224,10 +410,20 @@ class ContextManager:
                 "effective_message_budget": effective_budget,
                 "request_chars": candidate_size + reserved_chars,
                 "max_chars": self.max_chars,
-                "budget_kind": "serialized_characters_not_tokens",
-                "overflow": candidate_size > effective_budget,
+                "original_tokens": original_tokens,
+                "estimated_tokens": candidate_tokens,
+                "reserved_tokens": reserved_tokens,
+                "effective_token_budget": effective_token_budget,
+                "request_tokens": candidate_tokens + reserved_tokens,
+                "max_tokens": self.max_tokens,
+                "budget_kind": (
+                    "serialized_characters_not_tokens"
+                    if self.max_tokens is None
+                    else "chars_and_bpe_tokens"
+                ),
+                "overflow": not fits_budget,
             }
-            if candidate_size <= effective_budget:
+            if fits_budget:
                 candidate = (
                     ([first] + pinned if first else [])
                     + [message for group in tail[dropped_groups:] for message in group]
@@ -236,10 +432,13 @@ class ContextManager:
                 return deepcopy(candidate)
             # 最新一组不能删除；只剩下原任务、固定工作状态时也不能继续缩小。
             if len(tail) - dropped_groups <= 1:
-                raise ContextOverflow("原任务、固定工作状态与最新完整消息组超过上下文字符预算")
+                if not fits_chars:
+                    raise ContextOverflow("原任务、固定工作状态与最新完整消息组超过上下文字符预算")
+                raise ContextOverflow("原任务、固定工作状态与最新完整消息组超过上下文 BPE token 预算")
             overflow_triggered = True
             removed += len(tail[dropped_groups])
             remaining_cost -= group_costs[dropped_groups]
+            remaining_token_cost -= group_token_costs[dropped_groups]
             dropped_groups += 1
 
     def stats(self) -> dict:

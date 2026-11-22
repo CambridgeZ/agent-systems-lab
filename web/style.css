@@ -638,6 +638,87 @@ footer {
   font-size: 9px;
   color: #909b8e;
   padding: 22px 0 28px;
+}
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.local-cwd-row {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.local-cwd-row label {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.local-cwd-row input {
+  flex: 1;
+  font: 11px ui-monospace, monospace;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fafbf8;
+  color: var(--ink);
+}
+.terminal-out {
+  background: #1d2623;
+  color: #dce7de;
+  font-size: 10.5px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  margin-top: 8px;
+  max-height: 240px;
+}
+.gui-shot-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 280px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  margin-top: 8px;
+}
+.dream-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 12px;
+}
+.dream-controls input,
+.mini input,
+.mini textarea {
+  width: 100%;
+  font-size: 11px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fafbf8;
+  margin-bottom: 4px;
+}
+.wiki-pages-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 10px 0;
+}
+.wiki-chip {
+  font: 10px ui-monospace, monospace;
+  background: #eef4ec;
+  color: #316750;
+  border: 1px solid #d5e2d2;
+  border-radius: 4px;
+  padding: 4px 7px;
+  cursor: pointer;
+}
+.wiki-chip.hypothesis {
+  background: #f8eedf;
+  color: #9e6637;
+  border-color: #ead8bd;
+}
   border-top: 1px solid var(--line);
   display: flex;
   justify-content: space-between;

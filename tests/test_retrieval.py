@@ -135,3 +135,124 @@ def test_tokenizer_preserves_code_identifiers_and_chinese_bigrams():
     terms = tokenize("exponential_backoff 429 中文检索")
     assert "exponential_backoff" in terms and "429" in terms
     assert "中文" in terms and "检索" in terms
+
+
+def test_fenced_code_comments_never_become_title_or_section_headings(tmp_path):
+    (tmp_path / "code_only.md").write_text(
+        "Intro paragraph before code.\n\n"
+        "```python\n"
+        "# Not a heading\n"
+        "def foo(): pass\n"
+        "```\n\n"
+        "   ~~~sh\n"
+        "# Still not a heading\n"
+        "echo done\n"
+        "   ~~~\n",
+        encoding="utf-8",
+    )
+    kb = KnowledgeBase(tmp_path)
+    assert kb.index_stats()["chunks"] == 1
+    results = kb.search("foo")
+    assert len(results) == 1
+    assert results[0]["title"] == "未命名笔记"
+    assert results[0]["heading"] == "未命名笔记"
+    assert "# Not a heading\ndef foo(): pass" in results[0]["text"]
+    assert "# Still not a heading\necho done" in results[0]["text"]
+
+    crlf_dir = tmp_path / "crlf"
+    lf_dir = tmp_path / "lf"
+    crlf_dir.mkdir()
+    lf_dir.mkdir()
+    markdown = "# Guide\n\n## Implementation\nBefore.\n```python\n# Not a heading\ndef foo(): pass\n```\nAfter.\n"
+    (lf_dir / "guide.md").write_bytes(markdown.encode("utf-8"))
+    (crlf_dir / "guide.md").write_bytes(markdown.replace("\n", "\r\n").encode("utf-8"))
+    lf_hit = KnowledgeBase(lf_dir).search("Implementation")[0]
+    crlf_hit = KnowledgeBase(crlf_dir).search("Implementation")[0]
+    assert lf_hit == crlf_hit
+    assert lf_hit["title"] == "Guide"
+    assert lf_hit["heading"] == "Implementation"
+    assert "# Not a heading\ndef foo(): pass" in lf_hit["text"]
+
+
+def test_camelcase_and_snake_case_subtoken_matching(notes, tmp_path):
+    assert tokenize("exponentialBackoff") == ["exponentialbackoff", "exponential", "backoff"]
+    assert tokenize("max_discount_cents") == ["max_discount_cents", "max", "discount", "cents"]
+
+    cross_hits = KnowledgeBase(notes).search("exponentialBackoff")
+    assert len(cross_hits) == 1
+    assert cross_hits[0]["source"] == "retry.md"
+    assert cross_hits[0]["bm25_score"] > 0
+    assert cross_hits[0]["vector_score"] > 0
+
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    (custom_dir / "pricing.md").write_text(
+        "# Pricing\n\n## Limits\n"
+        "Enforce max_discount_cents and exponentialBackoff during checkout.\n",
+        encoding="utf-8",
+    )
+    kb = KnowledgeBase(custom_dir)
+    assert kb.search("maxDiscountCents")[0]["source"] == "pricing.md"
+    assert kb.search("exponential_backoff")[0]["source"] == "pricing.md"
+
+    # 同时存在精确 snake_case 与跨命名 camelCase 时，精确全词匹配排在第一位，跨命名紧随其后。
+    combined_hits = KnowledgeBase(tmp_path).search("exponential_backoff", limit=5)
+    assert [hit["source"] for hit in combined_hits] == ["notes/retry.md", "custom/pricing.md"]
+
+
+def test_pluggable_semantic_embedder_and_reranker(tmp_path):
+    (tmp_path / "throttle.md").write_text(
+        "# Traffic Control\n\n## Quota\nHTTP 429 upstream throttling window.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "storage.md").write_text(
+        "# Persistence\n\n## Checkpoints\nSQLite WAL checkpoint durability.\n",
+        encoding="utf-8",
+    )
+
+    def fake_embedder(texts: list[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for item in texts:
+            lowered = item.lower()
+            if "throttling" in lowered or "rate limit" in lowered:
+                # 故意返回非单位向量 [3, 4]，验证内部会做 L2 归一化。
+                vectors.append([3.0, 4.0])
+            elif "sqlite" in lowered:
+                vectors.append([-3.0, 0.0])
+            else:
+                vectors.append([0.0, 5.0])
+        return vectors
+
+    kb = KnowledgeBase(tmp_path, embedder=fake_embedder)
+    stats = kb.index_stats()
+    assert stats["semantic_embeddings"] is True
+    assert "dense semantic cosine" in stats["retrieval"]
+
+    # 查询词与文档完全无词面重合，仅靠稠密语义向量召回，且点积归一化为 1.0。
+    semantic_hits = kb.search("rate limit")
+    assert len(semantic_hits) == 1
+    assert semantic_hits[0]["source"] == "throttle.md"
+    assert semantic_hits[0]["bm25_score"] == 0.0
+    assert semantic_hits[0]["vector_score"] == pytest.approx(1.0)
+
+    def promote_storage_reranker(query: str, candidates: list[dict]) -> list[float]:
+        return [10.0 if item["source"] == "storage.md" else 1.0 for item in candidates]
+
+    def both_positive_embedder(texts: list[str]) -> list[list[float]]:
+        return [[3.0, 4.0] for _ in texts]
+
+    reranked_kb = KnowledgeBase(tmp_path, embedder=both_positive_embedder, reranker=promote_storage_reranker)
+    assert "reranker" in reranked_kb.index_stats()["retrieval"]
+    reranked = reranked_kb.search("system", limit=2)
+    assert [item["source"] for item in reranked] == ["storage.md", "throttle.md"]
+    assert reranked[0]["rerank_score"] == 10.0
+
+    dict_reranked_kb = KnowledgeBase(
+        tmp_path,
+        embedder=both_positive_embedder,
+        reranker=lambda query, candidates: sorted(candidates, key=lambda c: c["source"], reverse=True),
+    )
+    assert [item["source"] for item in dict_reranked_kb.search("system", limit=2)] == [
+        "throttle.md",
+        "storage.md",
+    ]

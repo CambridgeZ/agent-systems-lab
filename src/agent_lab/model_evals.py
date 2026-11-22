@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,8 +29,8 @@ from .evals import pass_at_k
 from .git_repo import create_task_worktree, init_git_repo_from_dir, worktree_status
 from .providers import Provider
 from .runtime import AgentRuntime
-from .sandbox import SandboxRunner, discover_test_oracles
-from .storage import Storage, digest
+from .sandbox import SANDBOX_FAILURE_CODES, SANDBOX_INFRA_CODES, SandboxRunner, discover_test_oracles
+from .storage import Storage
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_DIR = ROOT / "data/evals/coding_benchmark"
@@ -104,13 +105,14 @@ class BenchmarkReferenceProvider:
         sandbox_runs = [
             r
             for r in results
-            if r.get("code") in {"passed", "tests_failed", "no_tests_ran", "test_count_mismatch"}
-            or str(r.get("code", "")).startswith("sandbox_")
+            if r.get("code") == "passed"
+            or r.get("code") in SANDBOX_FAILURE_CODES
+            or r.get("code") in SANDBOX_INFRA_CODES
         ]
         latest_sandbox = sandbox_runs[-1] if sandbox_runs else None
         if latest_sandbox and (
             latest_sandbox.get("code") == "passed"
-            or str(latest_sandbox.get("code", "")).startswith("sandbox_")
+            or latest_sandbox.get("code") in SANDBOX_INFRA_CODES
         ):
             return _resp(
                 [{"type": "text", "text": f"基准流水线参考修复结束，沙箱状态：{latest_sandbox.get('code')}。"}]
@@ -268,7 +270,7 @@ def _oracles_intact(workspace: Path, oracles: dict[str, str]) -> bool:
         target = workspace / rel_path
         if not target.is_file() or target.is_symlink():
             return False
-        if digest(target.read_text(encoding="utf-8")) != expected_sha:
+        if hashlib.sha256(target.read_bytes()).hexdigest() != expected_sha:
             return False
     return True
 
@@ -298,7 +300,7 @@ async def _run_single_benchmark_trial(
         if verify_baseline:
             base_res = SandboxRunner().run_suite(worktree, oracles, expected_tests=expected_tests)
             baseline_check = {"checked": True, "code": base_res.get("code")}
-            if str(base_res.get("code", "")).startswith("sandbox_"):
+            if str(base_res.get("code", "")) in SANDBOX_INFRA_CODES:
                 return {
                     "task_id": task["id"],
                     "title": task["title"],
@@ -404,6 +406,7 @@ async def _run_single_benchmark_trial(
         )
 
         # 独立考官重验：先检查测试文件哈希零篡改；若模型未运行容器测试但修改了源码，主动补跑容器套件判分。
+        last_ver_code = str(ver.get("last_code") or "")
         if not _oracles_intact(worktree, oracles):
             outcome = "model_failure"
             failure_category: str | None = "test_oracle_tampered"
@@ -414,13 +417,19 @@ async def _run_single_benchmark_trial(
             failure_category = "provider_network_or_auth_error"
             final_ver_status = ver.get("status", "not_run")
             tests_executed = bool(ver.get("tests_executed"))
-        elif ver.get("status") == "unavailable":
+        elif last_ver_code in SANDBOX_INFRA_CODES or (
+            ver.get("status") == "unavailable" and last_ver_code not in SANDBOX_FAILURE_CODES
+        ):
             outcome = "infrastructure_failure"
             failure_category = "sandbox_unavailable"
             final_ver_status = "unavailable"
             tests_executed = False
         else:
-            final_ver_status = ver.get("status", "not_run")
+            final_ver_status = (
+                "failed"
+                if last_ver_code in SANDBOX_FAILURE_CODES and ver.get("status") != "passed"
+                else ver.get("status", "not_run")
+            )
             tests_executed = bool(ver.get("tests_executed"))
             if final_ver_status != "passed" and changed_files:
                 audit_res = SandboxRunner().run_suite(worktree, oracles, expected_tests=expected_tests)
@@ -428,7 +437,7 @@ async def _run_single_benchmark_trial(
                 if code == "passed" and audit_res.get("tests_executed") is True:
                     final_ver_status = "passed"
                     tests_executed = True
-                elif code.startswith("sandbox_"):
+                elif code in SANDBOX_INFRA_CODES:
                     final_ver_status = "unavailable"
                     tests_executed = False
                 else:

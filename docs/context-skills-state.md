@@ -1,18 +1,19 @@
 # 长任务 Agent：上下文、Skill 与工具状态为什么要分开管理
 
-本项目把三件事分开：数据库保存执行事实，模型只接收当前需要的证据，确定性代码控制工具执行与审批。这样可以缩小每轮请求，并在进程退出后恢复已经记录的工作。它支持同一 POSIX 主机的每 run 进程互斥；后台调度仍在本地进程中，尚未实现多副本高可用。
+本项目把三件事分开：数据库保存执行事实，模型只接收当前需要的证据，确定性代码控制工具执行与审批。这样可以缩小每轮请求，并在进程退出或节点切换后恢复已经记录的工作。它同时支持同机 POSIX `flock` 互斥与基于持久队列租约（`LeaseWorker` + 单调递增 `epoch` fencing token + `workspace_archives` 归档同步）的多 Worker 故障接管，并可通过 `postgresql://` DSN 切换至 PostgreSQL `FOR UPDATE SKIP LOCKED` 队列后端。
 
-阅读顺序建议是 [context.py](../src/agent_lab/context.py) → [skills.py](../src/agent_lab/skills.py) → [storage.py](../src/agent_lab/storage.py) → [runtime.py](../src/agent_lab/runtime.py)。下面的参数描述对应当前实现，不代表通用 Agent 框架标准。
+阅读顺序建议是 [context.py](../src/agent_lab/context.py) → [working_memory.py](../src/agent_lab/working_memory.py) → [skills.py](../src/agent_lab/skills.py) → [storage.py](../src/agent_lab/storage.py) → [runtime.py](../src/agent_lab/runtime.py)。下面的参数描述对应当前实现，不代表通用 Agent 框架标准。
 
-## 1. 先区分三种“记住”
+## 1. 先区分几种“记住”
 
 | 内容 | 当前保存位置 | 用途 | 不能据此推导的能力 |
 | --- | --- | --- | --- |
-| Run checkpoint | `runs.body`：任务、消息、待完成工具批次、活动 Skill、预算等 JSON | 恢复执行器控制流程 | 不等于外部系统已经执行成功 |
-| 工具调用账本 | `tool_calls`：调用身份、参数、状态、尝试次数、完整结果及哈希 | 找回结果、检测重复调用、判断如何恢复 | 不自动让任意副作用 exactly-once |
-| 事件与模型消息 | `events`、run/worker 的 `messages` | 审计可观察行为、重建对话；新工具消息可以只保存短投影 | 事件流并不保证含每个工具结果的完整正文 |
+| Run checkpoint | `runs.body`（带 `state_version` CAS）：任务、消息、待完成批次、活动 Skill、预算等 | 恢复执行器控制流程 | 不等于外部系统已经执行成功 |
+| 工具调用账本 | `tool_calls`：调用身份、参数、状态、尝试次数、完整结果及哈希 | 找回结果、检测重复调用、判断如何恢复 | 不自动让任意外部副作用 exactly-once |
+| 事件与模型消息 | `events`、run/worker 的 `messages` | 审计可观察行为、重建对话；新工具消息只保存有界投影 | 事件流并不保证含每个工具结果的完整正文 |
 | 当前推理上下文 | 每轮临时构建的 `system + tools + messages` | 让模型选择下一步 | 从上下文移除不等于删除数据库记录 |
-| 活动 Skill 快照 | run 的 `metadata.active_skills`，每轮作为固定参考资料插入 | 保持本次任务选定的操作方法与版本 | 不能授予新工具权限 |
+| 结构化工作记忆 | `metadata.working_memory`：带文件/工具哈希校验的 `goal/constraints/todos/facts` | 跨裁剪保留待办与可重验事实；源码变更后自动标 `stale` | 不能绑定失败调用，也不替代提案审批记录 |
+| 活动 Skill 快照 | `metadata.active_skills`：初始快照置前，运行期动态加载快照置尾 | 保持本次任务选定的操作方法与版本，保护历史 KV 前缀 | 不能授予新工具权限 |
 | 用户记忆 | `memories` 表 | 用户显式保存的跨任务笔记 | 不保证事实仍然有效，模型没有自主写入权限 |
 
 例如：上轮 `repo_read` 返回了完整文件，数据库保留结果；本轮模型可能只收到路径、结果摘要哈希、短摘录和取回方法。模型需要某段代码时继续读页，不能因为“数据库里有”就假设“本轮模型也看到了”。
@@ -34,32 +35,28 @@ flowchart TD
 
 这条流程优化的是信息如何进入上下文，以及执行状态如何恢复。它没有压缩模型权重，也没有要求保存模型隐藏思维链。
 
-## 2. 请求预算：这里严格检查的是字符，不是 token
+## 2. 请求预算：序列化字符与校准 BPE Token 双上限
 
-`AgentRuntime._complete()` 先计算固定开销，再把剩余空间交给 `ContextManager.build()`：
+`AgentRuntime._complete()` 先计算 `system + tools` 的固定开销，再交给 `ContextManager.build()` 同时校验**字符上限**（`max_chars`）与可选的**校准 BPE Token 上限**（`max_tokens`）：
 
 ```python
-reserved_chars = len(compact_json({
-    "system": system,
-    "tools": tools,
-    "messages": [],
-})) - 2
-effective_message_budget = context_chars - reserved_chars
-request_chars = reserved_chars + compact_json_length(kept_messages)
+reserved = len(canonical_json({"system": system, "tools": tools, "messages": []})) - 2
+est_tokens = estimate_bpe_tokens({"system": system, "tools": tools, "messages": kept_messages})
 ```
 
-这里的 `compact_json` 使用 `ensure_ascii=False` 和紧凑分隔符。减掉的 `2` 是空数组 `[]`，随后用真实消息数组长度替换。请求外层字段名、标点、system 指令、工具描述和输入 schema 都计入这个本地口径；活动 Skill 和固定状态作为消息计入。默认 `context_chars=24000`。
+- **零外部依赖 BPE 估算器（`estimate_bpe_tokens`）**：[`context.py`](../src/agent_lab/context.py) 按英文词根、数字块、CJK 汉字（`1.5x` 权重）、转义序列、JSON 结构符对与消息角色开销（`_MESSAGE_BPE_OVERHEAD = 4`）做确定性分段估算；若显式设置 `AGENT_LAB_USE_TIKTOKEN=1` 且本地已安装 `tiktoken`，则自动切换至 `cl100k_base` 精确编码。
+- **双天花板裁剪（`max_chars` + `max_tokens`）**：`ContextManager(max_chars=24000, max_tokens=...)` 支持同时传入字符预算与 `reserved_tokens` / `max_tokens` 双重上限；任一维度超限都会触发原子消息组裁剪与低水位阶梯回落（`budget_kind="chars_and_bpe_tokens"`）。
+- **并发在途预留与加权计费防击穿**：并行子代理共享 `self._budget_lock`，请求发出前先按 `estimate_bpe_tokens(...) + min(output_cap, 512)` 预占 `_inflight_reserved_tokens` 并收紧单轮 `output_cap`；响应返回后由 [`compute_usage_totals()`](../src/agent_lab/providers.py) 汇总全量输入（含 Anthropic `cache_creation_input_tokens` 1.25x 写入溢价与缓存读取折扣）写入 `billed_tokens`，以 `max(input + output, billed_tokens)` 共同防止长上下文预算被击穿。
 
-这个边界比“只数用户对话长度”完整，但要说清楚四个限制：
+仍需说明三个工程边界：
 
-1. 字符数不是 UTF-8 字节数，也不是真实 tokenizer 的 token 数。中文、英文、代码、JSON 的比例不同。
-2. 这是本地构建的 `system/tools/messages` JSON 口径，不包括服务商隐藏包装，也不是 SDK 最终 HTTP 请求每一个字段的大小保证。
-3. `max_tokens` 总量按响应后的 `usage` 累加；模型输入或并行在途调用仍可能让累计量越界。超过后会停止后续调用，不能宣传为严格费用上限。
-4. 上下文装得下只说明格式和空间可接受，不说明模型一定能正确利用其中每条信息。
+1. 默认零依赖估算器与不同商业模型私有分词器存在细微偏差，最终财务核算仍以服务端 `usage` 回执为准。
+2. 本地 `system/tools/messages` 口径不包含模型网关注入的隐藏安全包装。
+3. 上下文装得下只说明格式和空间可接受，不说明模型一定能正确利用其中每条信息。
 
-调试时查看 `context_built` / `context_overflow` 事件或 `metadata.context_stats`。`request_chars`、`reserved_chars`、`pinned_chars`、`dropped_groups` 能解释为什么发生裁剪；不能把它们命名为“节省 token”或“节省费用”。真实成本需要服务端 usage，效果需要同一任务与验收标准的对照实验。
+调试时查看 `context_built` / `context_overflow` 事件或 `metadata.context_stats`（含 `request_chars`、`reserved_chars`、`estimated_tokens`、`request_tokens`、`compaction_cursor`、`dropped_groups`）。
 
-## 3. 裁剪必须保持工具协议完整
+## 3. 裁剪协议完整性、大补丁防死锁与结构化工作记忆
 
 模型的一次 assistant 消息可能同时包含多个 `tool_use`。随后一条 user 消息必须含所有对应的 `tool_result`：
 
@@ -70,19 +67,27 @@ user:      tool_result(read-1), tool_result(search-1)
 
 这两条消息是一个原子组。`ContextManager._atomic_groups()` 会先验证角色、非空唯一 ID、紧邻关系和一一对应关系，再决定删哪些旧组。即使错误消息足够旧、原本会被删除，也不会借裁剪掩盖协议错误。
 
-当前保留规则是：最初的 user 任务、显式固定状态、最新完整消息组必须保留；空间不足时从最早的其他历史组开始删除。普通文本消息各自成组。它不会截掉 JSON 后半截，不会保留没有调用的结果，也不会把最近一次工具交换拆开。
+当前保留规则是：最初的 user 任务、前置固定技能快照（`pinned`）、最新完整消息组（`tail[-1]`）与尾部瞬态状态（`tail_state`）必须保留；空间不足时从最早的其他历史组开始删除，并在触发水位后一次性回落至 `low_watermark_ratio=0.62` 以保护后续轮次的 KV Cache 前缀。
 
-如果原任务、固定状态和最新完整组仍然超过预算，抛出 `ContextOverflow`，记录诊断后停止本轮。正确处理方式是减少活动 Skill、缩小工具输出投影、让用户拆任务或提高经过评估的预算；当前实现不会暗中截断必要内容。
+### 历史 `tool_use.input` 投影与紧急 `tail[-1]` 二次紧缩（消除大补丁死锁）
 
-注意：删除旧历史会丢失本轮可见的旧细节。虽然底层记录还在，模型也不一定知道该找哪一条；当前项目没有通用的历史语义搜索工具。因此裁剪通知要求重新读取证据，不能承诺“无损长上下文”。
+仅投影 `tool_result` 并不能覆盖所有超限场景：当模型在 `propose_patch` 或多文件 `propose_changeset` 中提交数千字符的 `old_text/new_text`（或单轮并发发出多达 8 个工具调用）时，庞大的参数位于 `assistant.tool_use.input` 内。若不做处理，一旦该轮成为唯一保留的 `tail[-1]`，任务就会永久卡死在 `ContextOverflow`。为此 [`AgentRuntime._project_history()`](../src/agent_lab/runtime.py) 实现了两级只读推理投影（不修改持久审计原文）：
 
-### 固定状态为什么比让模型自由总结更容易核验
+1. **常规历史输入投影**：对非最新 assistant 轮次（`idx < latest_assistant_idx`）中规范化 JSON 超过 `2600` 字符的 `tool_use.input`，替换为 `{"_omitted_large_input": true, "call_id": ..., "chars": ...}` 有界占位符。
+2. **紧急尾部紧缩（`emergency_tail=True`）**：若常规裁剪删光所有早期组后 `tail[-1]` 仍触发 `ContextOverflow`，`_complete()` 自动启用 `emergency_tail=True` 重试构建——将最新一组内超过 `1200` 字符的 `tool_use.input` 折叠为占位符，并将超过 `900` 字符的 `tool_result` 二次压缩为保留关键状态码、前 `200` 字符预览及 `tool_result_get` 引用的紧凑视图。只有二次紧缩后仍超出预算（例如原始 prompt 本身越界），才抛出 `ContextOverflow`。
 
-`_pinned()` 从持久状态生成 `HARNESS_STATE`，包含 run ID、状态、最近四个审批决定、当前等待的提案 ID，以及最近六个工具调用的 ID/名称/状态。工具状态通过 `call_summaries(limit=6)` 只读 SQL 索引列，不为生成几个状态字段而加载、解析所有完整结果 JSON。审批决定带提案 ID、文件路径和新版本哈希；完整提案仍在 `proposals` 表。活动 Skill 另以带版本的 `SKILL_SNAPSHOT` 加入。
+注意：删除旧历史会丢失本轮可见的旧细节。裁剪通知明确要求模型必要时通过 `repo_read` 或 `tool_result_get` 重新读取证据。
 
-这些内容有可追溯的记录来源，不是模型编写的“我已经完成了什么”。但固定状态只是有界索引：最近六个工具状态不等于所有结果，`approved` 也不等于业务测试通过，仍要回查实际结果。
+### 固定状态与带哈希防毒化的结构化工作记忆（Working Memory）
 
-固定消息使用普通 `user` 文本角色，不升级为 system 权限；ContextManager 拒绝用 pinned 注入 assistant、tool_use 或 tool_result。system 仍明确规定仓库内容、记忆、worker 与 Skill 都不能改变权限。字符级裁剪也不会改变工具的代码白名单。
+`AgentRuntime._tail_state()` 每轮在对话末尾注入两类可核验状态（使用普通 `user` 角色，不升级为 `system` 权限）：
+
+1. **`HARNESS_STATE`**：从持久记录生成 `run_id`、`status`、最近 4 个审批决定、当前等待的提案 ID，以及通过 `call_summaries(limit=6)` 只读索引列取出的最近 6 次调用状态。
+2. **`WORKING_MEMORY`（[`working_memory.py`](../src/agent_lab/working_memory.py)）**：允许模型维护有界的 `goal`（≤300 字）、`constraints`（≤8 条）、`todos`（≤10 项）与 `facts`（≤12 条，总投影预算 `_MAX_MEMORY_CHARS = 2400` 字符），并通过四项机制防止“错误摘要污染后续推理”：
+   - **拒绝绑定失败或未完成调用**：当 `source_type="tool_call"` 时，`_verify_fact_source()` 严格校验该调用已落盘、`status == "succeeded"`、`result_sha256` 非空且 `result.get("ok") is not False`；失败报错、待审批或不存在的调用一律以 `unverified_source` 拒绝写入。
+   - **关联工作区文件哈希追踪（`bound_files`）**：仅校验 `tool_call.result_sha256` 不足以发现“先 `repo_read` 记录事实、随后补丁修改了源码”的过期情况（因为账本中的历史调用结果不会变）。`_extract_tool_call_paths()` 会提取 `repo_read`、`symbol_search`、`repo_search`、`verify_python`、`propose_patch`、`propose_changeset` 以及一跳 `tool_result_get` 所指向的工作区文件路径并记录当时的 SHA-256 到 `bound_files`。一旦后续补丁修改或删除了对应文件，`audit_working_memory()` 实时重验时会立即将该事实降级为 `status="stale"`（`stale_reason="bound_file_hash_changed"` 或 `"file_hash_changed"`）。
+   - **显式增删与自动淘汰过期事实**：`working_memory_write` 支持 `remove_todo_ids`、`prune_done_todos`、`todos[].status="deleted"` 以及 `remove_fact_ids`、`prune_stale_facts`、`facts[].status="deleted"`；当事实条数超 12 条或总字符超 2400 时，默认开启的 `auto_evict_stale=True` 会按 `recorded_at` 从早到晚自动驱逐非本轮新增的 `stale` 事实，腾出预算空间。
+   - **确定性无噪声推理视图**：`prompt_view_working_memory()` 剥离数据库审计字段 `recorded_at` 与内部 `bound_files` 映射，避免墙钟时间戳破坏缓存一致性。
 
 ## 4. 大结果：保存全文，给模型短视图，必要时分页
 
@@ -129,16 +134,16 @@ user:      tool_result(read-1), tool_result(search-1)
 
 | 阶段 | 代码行为 | 对上下文的影响 |
 | --- | --- | --- |
-| 发现 | `catalog()` 读取有界 frontmatter，最多收集 32 个有效 Skill | 不预载所有正文 |
-| 初始候选 | `_system()` 按任务做词面排序，默认最多 8 条、元数据 JSON 不超过 2400 字符 | system 只带有界候选元数据 |
+| 发现与诊断 | `catalog()` 最多收集 32 个有效 Skill；`catalog_status()` 额外返回 `total_discovered`、`truncated`、`invalid_skipped` | 不预载正文，且超上限截断或损坏/符号链接跳过均可观测 |
+| 初始候选 | `_system()` 按任务做词面筛选后再按 `name` 字典序稳定排列，最多 8 条、JSON ≤ 2400 字符 | system 只带有界候选元数据，并保持跨任务根前缀稳定 |
 | 搜索 | `skill_search` 使用 `select()` 的有界词面匹配 | 返回候选，不自动激活正文；不是向量路由 |
 | 查看索引 | `skill_inspect` 返回章节标题、文件 SHA-256、正文字符数 | 不把正文加入活动上下文；内部仍需读取文件生成索引 |
-| 加载 | `skill_load` 保存整份正文或指定标题对应章节的快照 | 后续每轮插入这份活动快照；工具响应只回状态与哈希 |
-| 卸载 | `skill_unload` 从活动快照字典删除该名称 | 后续不再固定注入；已有审计记录与历史不因此删除 |
+| 加载 | `skill_load` 保存整份正文或指定章节快照（运行中途加载标记 `mid_run_dynamic=True`） | 首轮前置固定，中途加载追加在 `tail_state`，保护历史 KV 前缀 |
+| 卸载 | `skill_unload` 从活动快照字典删除该名称 | 后续不再注入；若原为中途加载技能，卸载同样零破坏历史前缀 |
 
-“词面排序”主要按查询词在名称/描述中出现与否评分，相同分数按名称排序；没有语义理解、置信度阈值或保证召回所有相关 Skill。目录上限也意味着大规模技能库需要分层索引或独立检索服务，不能单纯把目录堆大。
+“词面排序”主要按查询词在名称/描述中出现与否评分，相同分数按名称排序；没有语义理解、置信度阈值或保证召回所有相关 Skill。为防止目录超过 `MAX_CATALOG = 32` 或存在格式损坏条目时静默丢失，`SkillCatalog.catalog_status()` 会显式报告总发现数 `total_discovered`、`truncated` 布尔标记以及因格式错误或符号链接被跳过的目录名列表 `invalid_skipped`。
 
-按章节加载使用 Markdown 标题匹配：选择唯一同名标题，从该标题开始，直到下一个同级或更高层级标题。它是一个有限的标题解析器，不是完整 Markdown AST。先 inspect 可以避免标题不存在或重名；一个 Skill 名称只有一个活动快照，加载同名的另一个章节会替换前一个，当前不能并存同名的多个独立章节。
+解析器兼容 LF（`\n`）与 Windows CRLF（`\r\n`）换行的 `SKILL.md`：`_frontmatter_bounds()` 同时识别 `---\n` / `---\r\n` 与 `\r?\n---(?:\r?\n|$)` 结束边界，并拒绝 `|` / `>` 等多行 YAML 标记或重复字段；`_headings()` 在兼容 CRLF 的同时会自动跳过 ``` 或 `~~~` 代码围栏内部的 `#` 注释行，按原始文本偏移精确切出唯一同名章节。一个 Skill 名称只有一个活动快照，加载同名的另一个章节会替换前一个。
 
 ### 快照与缓存分别解决什么
 
@@ -218,43 +223,39 @@ uv run agent-lab result <run_id> <call_id> --offset 0 --limit 1200
 
 ## 7. 崩溃窗口：哪些已经弥合，哪些仍然存在
 
-每个 SQLite 操作独立开启连接和事务，启用 WAL、外键、FULL synchronous 与锁等待；调度和状态修改使用 `BEGIN IMMEDIATE`。它提高本地持久状态的一致性，但多个表、run checkpoint、事件、文件系统和模型服务之间没有一个共同事务。
+每个数据库操作独立开启事务：SQLite 模式启用 WAL、外键、可配置 `synchronous` 与 `BEGIN IMMEDIATE`（并发首次建表带退避重试）；PostgreSQL 模式使用标准事务与 `FOR UPDATE SKIP LOCKED`。同时 `runs` 表通过 `state_version` 乐观锁（CAS）与 `expected_epoch` 世代校验阻止过期覆盖。
 
-| 崩溃位置 | 当前恢复策略 | 仍需理解的边界 |
+| 崩溃位置 | 当前已实现的恢复策略 | 仍需理解的边界 |
 | --- | --- | --- |
-| 调用已登记，尚未开始 | 保留 scheduled 身份，按保存的待执行批次继续 | 不代表工具执行过 |
-| 工具已经开始，完成结果尚未提交 | 安全列表有限重放；其余标记 unknown | 无法从 running 推断是否产生副作用 |
-| 完整结果已提交，run 消息还没保存 | 同 call ID 找到账本结果，重建投影与消息 | events/run 与账本不是同一事务，不能只靠事件条数判断执行次数 |
-| 提案创建后、工具结果保存前 | `(run_id, operation_id)` 唯一键找回原提案，并验证补丁身份 | 仅保证本地提案创建幂等；不是任意外部操作 exactly-once |
-| 人工决定保存后、run 更新前 | resume 协调当前绑定的提案，不能用历史提案替代当前审批 | 不允许批准与拒绝反复翻转 |
-| 文件替换后、`applied` 标记保存前 | 文件等于 `new_sha256` 时补记；等于旧哈希才允许替换；其他版本拒绝覆盖 | 文件与数据库不是同一个事务，单文件替换也不是多文件事务 |
-| 模型响应返回后、usage/checkpoint 保存前 | 当前没有服务商请求级事务或通用结果查询 | 可能丢失本地计量或再次请求；轮次预扣也不是严格计费一致性 |
+| 调用已登记，尚未开始 | 保留 `scheduled` 身份，按保存的 `pending_calls` 批次继续 | 不代表工具执行过 |
+| 工具已经开始，完成结果尚未提交 | `SAFE_REPLAY` 列表有限重放（≤3 次）；其余标记 `unknown` | 无法从 `running` 推断非幂等外部工具是否已产生副作用 |
+| 完整结果已提交，run 消息还没保存 | 同 `call_id` 找回账本结果，重建投影与协议消息 | `events` / `runs` 与 `tool_calls` 不是同一事务 |
+| 提案创建后、工具结果保存前 | `(run_id, operation_id)` 唯一索引找回原提案，并逐文件校验补丁身份 | 仅保证本地单/多文件提案创建幂等，非任意外部 API 幂等 |
+| 人工审批与队列唤醒之间 | `Storage.approve_and_enqueue()` 在单事务内原子写入审批结果并将 `run_leases` 置为 `queued (action='resume')`；`release_lease()` 对抢先入队状态保持幂等 | 审批不可反复翻转；内联模式中断后由 `resume` 协调当前绑定提案 |
+| 单文件或多文件变更集中途崩溃、`applied` 标记保存前 | `ToolRegistry.apply_proposal()` 先持跨进程锁并写入 `.agent-apply-<id>.json` 写前日志（fsync + `os.replace`），逐个校验各文件属于 `old_sha256` 或 `new_sha256`（含 `create`/`delete`），崩溃重启后对未完成文件执行前滚（Roll-Forward），全部落盘并标记 `applied` 后清理日志 | 若审批后工作区文件被外部篡改为既非 `old_sha256` 也非 `new_sha256` 的第三状态，会显式报 `version_conflict` 拒绝覆盖 |
+| Worker 收到 `SIGTERM` / `CancelledError` 停机 | `_tool_thread()` shield 等待在途同步线程落盘；`LeaseWorker` 在未被抢占时同步归档并将租约退回 `queued`（`worker_shutdown_requeued`），`AgentRuntime` 标记 `interrupted` 或协作式 `cancelled` | `SIGKILL` / 断电无法走优雅退队，需等待 `lease_until` 超时后由新世代 Worker 接管 |
+| 模型响应返回后、usage/checkpoint 保存前 | 轮次在请求前预扣并落盘，并行在途请求通过 `_inflight_reserved_tokens` 预留配额 | 模型服务商侧无跨系统两阶段提交，极端崩溃仍可能重发单轮请求 |
 
-文件写入采用同目录临时文件、文件 fsync 和 `os.replace`，能够避免把半份目标文件暴露给正常读者；它不等于已实现完整的掉电恢复协议、多文件原子提交或跨主机存储复制。真实生产部署还需要匹配所用文件系统的持久化与备份策略。
+旧版本 checkpoint 中已经完成的工具往返可通过 `_hydrate_journal()` 导入账本而不执行工具。对于终态任务的磁盘与数据库膨胀，`Storage.gc_expired_resources()` 支持按保留期统一回收已结束任务的隔离工作区 / Git worktree（含 `git worktree prune`）、`workspace_archives` 快照以及通过 `cleanup_stale_locks()` 非阻塞独占二次核验的无主陈旧 `.lock` 文件。
 
-旧版本 checkpoint 中已经完成的工具往返，可以通过 `_hydrate_journal()` 导入账本而不执行工具；它不是对任意损坏日志的修复器。完整结果当前落在 SQLite JSON 中，没有实现无限结果大小、对象存储分层、加密、自动脱敏或保留期清理；仓库读取与分页等工具的自身限制仍然必要。
+## 8. 从“单机可恢复”到“多 Worker 容错”：代码已落地机制与外部部署边界
 
-## 8. “可恢复”与“高可用”之间还差什么
+本仓库现已将同机内核锁与数据库层租约隔离打通，覆盖单机多进程及共享事务存储的多 Worker 接管链路：
 
-当前适合演示：同一机器的本地文件系统、持久 SQLite 文件和每个 run 的隔离工作区；退出后重新创建 Runtime 恢复 run。`execute()`、`resume()`、`approve()` 公共入口通过 [execution_lock.py](../src/agent_lab/execution_lock.py) 的非阻塞 POSIX `flock` 争用同一 run 锁；内部继续执行使用 unlocked 方法，避免重复加锁。独立 CLI 与 API 进程不能同时执行同一个 run，拿不到锁会抛出 `RunBusy`；API 后台将这种情况记为 `run_busy` 事件，不覆盖持锁者的任务状态。这不意味着后台任务冲突必然同步返回 HTTP 409。
+1. **统一 `flock` + 单调递增 `epoch` 世代隔离**：`execute()`、`resume()`、`approve()` 与 `LeaseWorker` 均通过 [`execution_lock.py`](../src/agent_lab/execution_lock.py) 争用非阻塞 POSIX `flock`；内联执行器启动时调用 `bump_inline_epoch()` 递增世代并拦截活跃队列租约，队列 Worker 每次接管自动将 `epoch + 1`。所有数据库写路径（`save_run`、`schedule_call`、`start_call`、`finish_call`、`create_proposal`、`mark_proposal_applied`、`save_workspace_archive`）及工作区补丁/Git 提交前均强制执行 `_verify_epoch_tx()`，旧世代僵尸 Worker 恢复执行会立即抛出 `StaleEpochError`。
+2. **`0711` 仅执行权限祖先目录安全穿透**：生产容器与多用户宿主机常将 `/home/<user>` 或父挂载点设为 `0711`（允许 `x` 穿透但禁止 `r` 列目录）。`_open_database_parent()` 优先使用 `O_PATH | O_DIRECTORY | O_NOFOLLOW` 逐层打开目录描述符；在不支持 `O_PATH`（如 macOS）且祖先目录返回 `EACCES`/`EPERM` 时，自动回退至 `_verify_parent_prefixes_and_open()` 逐级 `lstat` 拒绝符号链接后再安全打开目标锁目录。
+3. **死信队列（`max_takeovers` DLQ）与跨节点工作区归档（`workspace_archives`）**：`claim_next_run(max_takeovers=3)` 对反复超时被接管的毒丸任务自动转入 `dead_letter`（标记 `DeadLetterExceeded` 并记录 `run_dead_lettered` 事件），避免拖垮整个 Worker 池；开启 `AGENT_LAB_SYNC_WORKSPACE_ARCHIVE=1`（或已有归档）时，Worker 会在接管前通过 `unpack_workspace_archive()` 将最新世代的工作区快照物化到本地目录，并在执行或 `SIGTERM` 优雅退队时通过 `save_workspace_archive()` 回写（同样受 `epoch` 防倒退保护）。
 
-进程退出后内核释放持有的 flock。锁文件本身要保留：删除后重建会生成不同 inode，可能让两个执行者分别持有两个“同名”锁。锁目录与文件有符号链接/硬链接防护；适用范围是同一 POSIX 主机、本地文件系统和遵循这些入口的执行器，不承诺网络文件系统或跨主机正确性。同 run 的锁也不等于任意两个 run 对同一外部工作区的全局互斥。
+代码层已完成机制与外部多节点基础设施边界对照如下：
 
-另一个边界是 `asyncio.to_thread`：取消协程不会停止已经启动的同步线程。当前 `_tool_thread()` 使用 shield，收到协程取消后等待该线程完成、把结果写入账本，才释放 run 锁，避免旧线程仍在执行时新 CLI 取得锁。它会延后取消完成时间；真正终止进程仍需依靠 running/unknown 恢复策略。这不是通用的外部服务取消、回滚或业务补偿方案。
-
-API 的后台 job 表与共享预算锁仍属于进程内状态；SQLite 事务不等于跨机器任务租约。把服务复制到其他主机、绕过公共入口，或让多个 run 共用可写工作区，仍可能重复执行或互相覆盖。生产改造可按以下顺序进行，每项都需要故障注入验证：
-
-| 目标 | 需要补的机制 | 要验证的失败场景 |
+| 目标维度 | 本仓库代码已实现的机制 | 跨物理节点生产部署仍需配套的外部边界 |
 | --- | --- | --- |
-| 多 worker 接任务 | 持久任务队列、claim/lease、心跳、租约超时 | worker 退出后任务能够被接管，正常任务不会同时领两次 |
-| 防止过期 worker 写回 | 单调递增 fencing token，存储/工作区写入校验 token | 旧 worker 暂停后恢复，不能覆盖新 owner 的结果 |
-| 防止 run JSON 丢更新 | 状态版本号 + CAS，或按规范化表事务更新 | 两个执行器同时保存，不会后写覆盖先写 |
-| 模型和工具限流 | 共享 admission control、在途预算预留、租户配额 | 多副本同时发起请求仍遵守共享限制 |
-| 审批与外部副作用可靠衔接 | 审批绑定版本、幂等键、outbox/inbox、查询与补偿 | 外部成功但本地超时，能够核对而不是盲目重放 |
-| 数据可用性 | 可靠数据库部署、备份恢复、对象存储结果分层 | 单机磁盘丢失后能够恢复到已定义的 RPO/RTO |
-| 取消与可观测性 | 取消传播、子进程清理、关联 ID、受控敏感数据记录 | 取消后旧任务不继续写，工具超时不遗留无限进程 |
-
-这些是扩展方向，不是本仓库已经具备的能力。恢复正确性、可用性、模型回答质量应分别评估；多加几个 Agent、容器或数据库连接不会自动形成高可用系统。
+| 多 Worker 队列与毒丸隔离 | `run_leases` 表、`LeaseWorker` 心跳续租、超时接管、`max_takeovers` 自动转入 `dead_letter`、`SIGTERM` 优雅退回 `queued` | 需部署外部高可用 PostgreSQL 实例（通过 `Storage.from_dsn("postgresql://...")` 启用 `FOR UPDATE SKIP LOCKED`），SQLite 文件不可挂载于 NFS |
+| 防止过期 Worker 脑裂写回 | 单调递增 `epoch` fencing token + `bump_inline_epoch` + 工作区写前日志与归档世代校验 | 若未来接入外部发邮件/支付等第三方非幂等 API，仍需目标服务端支持幂等键或 Outbox 对账 |
+| 防止并发丢更新 | `runs.state_version` 乐观锁（CAS）+ 规范化 `tool_calls`/`proposals` 独立行事务 | 超大工具结果若突破百 MB 量级，生产上宜外置到 S3/OSS 对象存储而非存单列 JSON |
+| 审批与重入队一致性 | `approve_and_enqueue()` 单事务原子提交审批决策与 `queued/resume` 状态 | 多租户细粒度 RBAC 权限体系需结合企业网关/IAM 扩展 |
+| 准入限流与预算保护 | `ProviderRateLimiter`（RPM/TPM 滑动窗口预留与回填）+ `_inflight_reserved_tokens` 并发预占 + 缓存加权 `billed_tokens` | 当前限流器为单进程内存态；多副本全局配额需接入外部 Redis 令牌桶或统一 LLM Gateway |
+| 资源回收与数据持久性 | `gc_expired_resources()` 自动清理过期 worktree、`workspace_archives` 与无主 `.lock` 文件 | 生产级 RPO/RTO 仍依赖托管数据库的流复制、PITR 时间点恢复与异地备份 |
 
 ## 9. 两个无需模型密钥的可复现实验
 
@@ -330,6 +331,6 @@ PY
 
 ## 10. 面试时如何讲这三个优化
 
-可以用一分钟描述：“我把执行状态和模型上下文分开。每次模型请求把 system 和工具 schema 也纳入本地字符预算，按完整工具往返裁剪旧历史；原任务、当前审批状态与活动 Skill 快照保留。大工具结果先落到账本，模型拿短投影和可校验的分页引用。Skill 先搜索元数据、看章节，再固定内容哈希加载，重复加载不会重复常驻，卸载释放后续上下文。工具账本用 run/call ID 绑定工具与参数哈希，结果先提交再更新对话；只读和幂等提案可以有限恢复，无法确认的执行标记 unknown。同机 flock 防止 CLI 与 API 同时执行一个 run，现在具备本地恢复与互斥，尚未实现跨机器租约、fencing 与严格费用上限。”
+可以用一分钟描述：“我把执行状态和模型上下文分开。每次模型请求同时受序列化字符与校准 BPE token 双重预算约束，按完整工具往返与高低水位裁剪旧历史，并对超大 `tool_use.input` 及溢出尾组做二次紧缩防死锁；动态变化的 `HARNESS_STATE`、带 `bound_files` 哈希防毒化校验的 `WORKING_MEMORY` 以及运行中途加载的 Skill 快照统一追加在对话末尾以保护 KV Cache 前缀。大工具结果先落到账本，模型拿短投影和分页引用。工具账本与多文件补丁写前日志绑定调用身份、状态版本号与单调递增 `epoch` fencing token；同机 `flock`、持久队列 `LeaseWorker`、死信队列与 `workspace_archives` 归档共同保证故障接管一致性，跨物理机器部署只需挂载高可用 PostgreSQL 与全局网关限流。”
 
 继续追问时要能解释三个具体失败例子：孤立 tool_result 会违反协议；外部执行成功但本地未落盘不能盲目重试；上下文删除了历史，模型仍需显式取回证据。这比只说“做了压缩、缓存、重试”更容易验证。

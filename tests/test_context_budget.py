@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from agent_lab.context import ContextManager, ContextOverflow
+from agent_lab.context import ContextManager, ContextOverflow, estimate_bpe_tokens
 
 
 def compact_size(messages):
@@ -181,3 +181,97 @@ def test_old_malformed_protocol_is_not_hidden_by_pruning():
     messages += tool_exchange("latest", "newest")
     with pytest.raises(ValueError, match="一一对应"):
         ContextManager(max_chars=500).build(messages, pinned=[{"role": "user", "content": "safe state"}])
+
+
+def test_estimate_bpe_tokens_cjk_escaped_json_and_framing():
+    assert estimate_bpe_tokens("") == 0
+    assert estimate_bpe_tokens([]) == 0
+
+    ascii_text = "a" * 100
+    cjk_text = "中" * 100
+    assert estimate_bpe_tokens(ascii_text) == 25
+    assert estimate_bpe_tokens(cjk_text) == 150
+    assert estimate_bpe_tokens(cjk_text) > estimate_bpe_tokens(ascii_text) * 4
+
+    escaped_json = json.dumps({"snippet": 'line1\n"quoted"\n"second"\n'}, ensure_ascii=False)
+    same_len_words = "word" * (len(escaped_json) // 4)
+    assert estimate_bpe_tokens(escaped_json) > estimate_bpe_tokens(same_len_words)
+
+    multibyte_other = "éБあ" * 10
+    assert estimate_bpe_tokens(multibyte_other) >= 30
+
+    msg = {"role": "user", "content": '中文\n"quoted"'}
+    conv = [msg]
+    assert estimate_bpe_tokens(msg) > estimate_bpe_tokens(msg["content"])
+    assert estimate_bpe_tokens(conv) > estimate_bpe_tokens(msg)
+
+
+def test_max_tokens_prunes_cjk_exchange_that_fits_char_budget_and_compacts_hysteresis():
+    messages = [
+        {"role": "user", "content": "请修复折扣计算逻辑"},
+        *tool_exchange("old_cjk_1", "历史中文检索片段" * 60),
+        *tool_exchange("old_cjk_2", "早期代码审查记录" * 60),
+        *tool_exchange("latest", "当前最小证据"),
+    ]
+    total_chars = compact_size(messages)
+    assert total_chars < 4000
+
+    # 仅启用字符预算时，完整消息装得下且仍报告 estimated_tokens / reserved_tokens / max_tokens
+    char_only = ContextManager(max_chars=4000)
+    unpruned = char_only.build(messages)
+    assert unpruned == messages
+    char_stats = char_only.stats()
+    assert char_stats["budget_kind"] == "serialized_characters_not_tokens"
+    assert char_stats["max_tokens"] is None
+    assert char_stats["reserved_tokens"] == 0
+    assert char_stats["estimated_tokens"] == estimate_bpe_tokens(messages)
+    assert char_stats["dropped_messages"] == 0
+
+    # 启用 max_tokens 时，CJK 文本虽远低于 max_chars，但因超出 BPE token 预算触发原子裁剪
+    token_mgr = ContextManager(max_chars=4000, max_tokens=900)
+    kept = token_mgr.build(messages, reserved_tokens=100)
+    t_stats = token_mgr.stats()
+    assert t_stats["budget_kind"] == "chars_and_bpe_tokens"
+    assert t_stats["max_tokens"] == 900
+    assert t_stats["reserved_tokens"] == 100
+    assert t_stats["effective_token_budget"] == 800
+    assert t_stats["dropped_groups"] >= 1
+    assert t_stats["estimated_tokens"] == estimate_bpe_tokens(kept)
+    assert t_stats["estimated_tokens"] <= 800
+    assert t_stats["request_tokens"] <= 900
+    assert kept[-2:] == messages[-2:]
+
+    # 启用 low_watermark_ratio 时，BPE token 超限同样按低水位一次性阶梯压缩旧历史
+    hysteresis_mgr = ContextManager(max_chars=4000, low_watermark_ratio=0.35, max_tokens=1500)
+    kept_low = hysteresis_mgr.build(messages)
+    assert hysteresis_mgr.stats()["dropped_groups"] == 2
+    assert kept_low[1:] == messages[-2:]
+    assert hysteresis_mgr.stats()["estimated_tokens"] == estimate_bpe_tokens(kept_low)
+
+
+def test_cjk_text_fitting_char_budget_raises_context_overflow_when_exceeding_bpe_budget():
+    messages = [
+        {"role": "user", "content": "核心中文业务背景说明" * 50},
+        *tool_exchange("latest", "最新工具返回的中文结果" * 50),
+    ]
+    assert compact_size(messages) < 3000
+    manager = ContextManager(max_chars=3000, max_tokens=600)
+    with pytest.raises(ContextOverflow, match="BPE token"):
+        manager.build(messages, reserved_tokens=50)
+    stats = manager.stats()
+    assert stats["overflow"] is True
+    assert stats["kept_chars"] < 3000
+    assert stats["estimated_tokens"] > 550
+    assert stats["budget_kind"] == "chars_and_bpe_tokens"
+
+
+@pytest.mark.parametrize("bad_tokens", [True, False, 0, -5, 1.5, "500"])
+def test_invalid_max_tokens_is_rejected(bad_tokens):
+    with pytest.raises(ValueError, match="max_tokens"):
+        ContextManager(max_chars=1000, max_tokens=bad_tokens)
+
+
+@pytest.mark.parametrize("bad_reserved", [True, -1, 2.5, "50", None])
+def test_invalid_reserved_tokens_is_rejected(bad_reserved):
+    with pytest.raises(ValueError, match="reserved_tokens"):
+        ContextManager(max_chars=1000, max_tokens=500).build([], reserved_tokens=bad_reserved)
