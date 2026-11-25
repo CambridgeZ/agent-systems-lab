@@ -26,6 +26,8 @@ import time
 import uuid
 from typing import Any
 
+from .observability import format_traceparent, get_trace_id
+
 
 SANDBOX_FAILURE_CODES = frozenset(
     {
@@ -45,6 +47,7 @@ SANDBOX_FAILURE_CODES = frozenset(
 SANDBOX_INFRA_CODES = frozenset(
     {
         "sandbox_unavailable",
+        "sandbox_cancelled",
         "image_missing",
         "daemon_error",
         "sandbox_error",
@@ -478,6 +481,21 @@ class _CommandResult:
     timed_out: bool = False
     output_limited: bool = False
     error: str | None = None
+    cancelled: bool = False
+
+
+def _acquire_sandbox_slot(cancel_event: threading.Event | None) -> bool:
+    """获取并发沙箱信号量槽位；传入 cancel_event 时按 50ms 切片协作响应取消请求。"""
+    if cancel_event is None:
+        _SANDBOX_SEMAPHORE.acquire()
+        return True
+    while not cancel_event.is_set():
+        if _SANDBOX_SEMAPHORE.acquire(timeout=0.05):
+            if cancel_event.is_set():
+                _SANDBOX_SEMAPHORE.release()
+                return False
+            return True
+    return False
 
 
 class SandboxRunner:
@@ -800,8 +818,16 @@ class SandboxRunner:
         }
 
     @staticmethod
-    def _capture(command: list[str], timeout: float, limit: int) -> _CommandResult:
-        """最多实际读取 limit+1 字节；超限立即杀 CLI，不把无限输出写到磁盘。"""
+    def _capture(
+        command: list[str],
+        timeout: float,
+        limit: int,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> _CommandResult:
+        """最多实际读取 limit+1 字节；超限、超时或协作取消时立即杀 CLI，不把无限输出写到磁盘。"""
+        if cancel_event is not None and cancel_event.is_set():
+            return _CommandResult(None, b"", cancelled=True)
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -812,7 +838,7 @@ class SandboxRunner:
             shell=False,
         )
         output = bytearray()
-        timed_out = output_limited = False
+        timed_out = output_limited = cancelled = False
         error = None
         deadline = time.monotonic() + timeout
         selector = selectors.DefaultSelector()
@@ -821,20 +847,41 @@ class SandboxRunner:
                 raise OSError("Docker CLI 没有输出管道")
             selector.register(process.stdout, selectors.EVENT_READ)
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     timed_out = True
                     break
-                ready = selector.select(remaining)
+                wait_slice = min(remaining, 0.05) if cancel_event is not None else remaining
+                ready = selector.select(wait_slice)
                 if not ready:
-                    timed_out = True
-                    break
+                    if cancel_event is not None and cancel_event.is_set():
+                        cancelled = True
+                        break
+                    if deadline - time.monotonic() <= 0:
+                        timed_out = True
+                        break
+                    continue
                 part = os.read(process.stdout.fileno(), min(4096, limit + 1 - len(output)))
                 if not part:
-                    try:
-                        process.wait(timeout=max(0.001, deadline - time.monotonic()))
-                    except subprocess.TimeoutExpired:
-                        timed_out = True
+                    while True:
+                        if cancel_event is not None and cancel_event.is_set():
+                            cancelled = True
+                            break
+                        rem_wait = deadline - time.monotonic()
+                        if rem_wait <= 0:
+                            timed_out = True
+                            break
+                        slice_wait = min(max(0.001, rem_wait), 0.05) if cancel_event is not None else max(0.001, rem_wait)
+                        try:
+                            process.wait(timeout=slice_wait)
+                            break
+                        except subprocess.TimeoutExpired:
+                            if cancel_event is None or deadline - time.monotonic() <= 0:
+                                timed_out = True
+                                break
                     break
                 output.extend(part)
                 if len(output) > limit:
@@ -852,7 +899,14 @@ class SandboxRunner:
                     error = type(exc).__name__
             if process.stdout is not None:
                 process.stdout.close()
-        return _CommandResult(process.returncode, bytes(output[:limit]), timed_out, output_limited, error)
+        return _CommandResult(
+            process.returncode,
+            bytes(output[:limit]),
+            timed_out,
+            output_limited,
+            error,
+            cancelled,
+        )
 
     @staticmethod
     def _receipt(
@@ -910,6 +964,8 @@ class SandboxRunner:
         test_oracles: dict[str, str],
         expected_tests: int,
         pattern: str = "test*.py",
+        *,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """运行多文件或通用测试套件：校验全部受保护测试文件摘要与预期测试数回执。"""
         if type(expected_tests) is not int or not 1 <= expected_tests <= 200:
@@ -939,11 +995,17 @@ class SandboxRunner:
             "cleanup_error": None,
             "isolation": "docker_readonly_snapshot_network_none",
         }
+        if cancel_event is not None and cancel_event.is_set():
+            result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试已取消。")
+            return result
         temporary: str | None = None
         try:
             temporary = tempfile.mkdtemp(prefix="agent-lab-sandbox-")
             snapshot = Path(temporary).resolve() / "repo"
             result.update(self._snapshot_suite(Path(workspace), snapshot, test_oracles))
+            if cancel_event is not None and cancel_event.is_set():
+                result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试已取消。")
+                return result
             if self.remote_backend is not None:
                 remote_res = self.remote_backend.execute(
                     {
@@ -956,6 +1018,7 @@ class SandboxRunner:
                         "policy": asdict(self.policy),
                     },
                     timeout=float(self.policy.timeout_seconds) + self.remote_backend.timeout_buffer_seconds,
+                    cancel_event=cancel_event,
                 )
                 result.update(remote_res)
                 return result
@@ -964,8 +1027,14 @@ class SandboxRunner:
                 result["error"] = "未安装 Docker，未执行运行时测试。"
                 return result
             inspected = self._capture(
-                [docker, "image", "inspect", "--format", "{{.Id}}", self.policy.image], 5, 256
+                [docker, "image", "inspect", "--format", "{{.Id}}", self.policy.image],
+                5,
+                256,
+                cancel_event=cancel_event,
             )
+            if inspected.cancelled:
+                result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试已取消。")
+                return result
             if inspected.returncode != 0 and not (
                 inspected.timed_out or inspected.output_limited or inspected.error
             ):
@@ -973,7 +1042,11 @@ class SandboxRunner:
                     [docker, "image", "ls", "--format", "{{.ID}}", "--no-trunc", self.policy.image],
                     5,
                     256,
+                    cancel_event=cancel_event,
                 )
+                if inspected.cancelled:
+                    result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试已取消。")
+                    return result
             image_id = inspected.output.decode("ascii", errors="replace").strip()
             if (
                 inspected.returncode != 0
@@ -1025,19 +1098,33 @@ class SandboxRunner:
                 "-c",
                 driver,
             ]
+            if not _acquire_sandbox_slot(cancel_event):
+                result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试在排队期间已取消。")
+                return result
             try:
                 result["tests_executed"] = None
-                with _SANDBOX_SEMAPHORE:
+                try:
                     execution = self._capture(
-                        command, self.policy.timeout_seconds, self.policy.output_limit_bytes
+                        command,
+                        self.policy.timeout_seconds,
+                        self.policy.output_limit_bytes,
+                        cancel_event=cancel_event,
                     )
+                finally:
+                    _SANDBOX_SEMAPHORE.release()
                 display = execution.output.decode("utf-8", errors="replace").encode("utf-8")
                 result.update(
                     output=display[: self.policy.output_limit_bytes].decode("utf-8", errors="ignore"),
                     output_truncated=execution.output_limited,
                     exit_code=execution.returncode,
                 )
-                if execution.timed_out:
+                if execution.cancelled:
+                    result.update(
+                        code="sandbox_cancelled",
+                        cancelled=True,
+                        error="沙箱测试已取消，已请求终止容器。",
+                    )
+                elif execution.timed_out:
                     result.update(code="sandbox_timeout", error="容器测试超过时间上限，已请求终止。")
                 elif execution.output_limited:
                     result.update(code="sandbox_output_limit", error="容器输出超过硬上限，已请求终止。")
@@ -1098,7 +1185,13 @@ class SandboxRunner:
                     self._record_rmtree_failure(result, rm_exc)
         return result
 
-    def run(self, workspace: Path, oracle_sha256: str) -> dict:
+    def run(
+        self,
+        workspace: Path,
+        oracle_sha256: str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
         policy_hash = _sha(_json(self.policy.audit()).encode())
         result = {
             "ok": False,
@@ -1115,6 +1208,9 @@ class SandboxRunner:
             "cleanup_error": None,
             "isolation": "docker_readonly_snapshot_network_none",
         }
+        if cancel_event is not None and cancel_event.is_set():
+            result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试已取消。")
+            return result
         temporary: str | None = None
         try:
             # 父目录保持 0700；容器只看到 bind mount 后的 repo 根，repo 为 0755。
@@ -1122,6 +1218,9 @@ class SandboxRunner:
             temporary = tempfile.mkdtemp(prefix="agent-lab-sandbox-")
             snapshot = Path(temporary).resolve() / "repo"
             result.update(self._snapshot(Path(workspace), snapshot, oracle_sha256))
+            if cancel_event is not None and cancel_event.is_set():
+                result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试已取消。")
+                return result
             if self.remote_backend is not None:
                 remote_res = self.remote_backend.execute(
                     {
@@ -1132,6 +1231,7 @@ class SandboxRunner:
                         "policy": asdict(self.policy),
                     },
                     timeout=float(self.policy.timeout_seconds) + self.remote_backend.timeout_buffer_seconds,
+                    cancel_event=cancel_event,
                 )
                 result.update(remote_res)
                 return result
@@ -1140,8 +1240,14 @@ class SandboxRunner:
                 result["error"] = "未安装 Docker，未执行运行时测试。"
                 return result
             inspected = self._capture(
-                [docker, "image", "inspect", "--format", "{{.Id}}", self.policy.image], 5, 256
+                [docker, "image", "inspect", "--format", "{{.Id}}", self.policy.image],
+                5,
+                256,
+                cancel_event=cancel_event,
             )
+            if inspected.cancelled:
+                result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试已取消。")
+                return result
             if inspected.returncode != 0 and not (
                 inspected.timed_out or inspected.output_limited or inspected.error
             ):
@@ -1149,7 +1255,11 @@ class SandboxRunner:
                     [docker, "image", "ls", "--format", "{{.ID}}", "--no-trunc", self.policy.image],
                     5,
                     256,
+                    cancel_event=cancel_event,
                 )
+                if inspected.cancelled:
+                    result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试已取消。")
+                    return result
             image_id = inspected.output.decode("ascii", errors="replace").strip()
             if (
                 inspected.returncode != 0
@@ -1199,13 +1309,21 @@ class SandboxRunner:
                 "-c",
                 driver,
             ]
+            if not _acquire_sandbox_slot(cancel_event):
+                result.update(code="sandbox_cancelled", cancelled=True, error="沙箱测试在排队期间已取消。")
+                return result
             try:
                 # 不用 --rm 自动删除，统一以 finally 的 rm -f 成功回执确认清理。
                 result["tests_executed"] = None
-                with _SANDBOX_SEMAPHORE:
+                try:
                     execution = self._capture(
-                        command, self.policy.timeout_seconds, self.policy.output_limit_bytes
+                        command,
+                        self.policy.timeout_seconds,
+                        self.policy.output_limit_bytes,
+                        cancel_event=cancel_event,
                     )
+                finally:
+                    _SANDBOX_SEMAPHORE.release()
                 # 损坏 UTF-8 的替换字符可能扩成三个字节，显示结果也保持同一字节硬上限。
                 display = execution.output.decode("utf-8", errors="replace").encode("utf-8")
                 result.update(
@@ -1213,7 +1331,13 @@ class SandboxRunner:
                     output_truncated=execution.output_limited,
                     exit_code=execution.returncode,
                 )
-                if execution.timed_out:
+                if execution.cancelled:
+                    result.update(
+                        code="sandbox_cancelled",
+                        cancelled=True,
+                        error="沙箱测试已取消，已请求终止容器。",
+                    )
+                elif execution.timed_out:
                     result.update(code="sandbox_timeout", error="容器测试超过时间上限，已请求终止。")
                 elif execution.output_limited:
                     result.update(code="sandbox_output_limit", error="容器输出超过硬上限，已请求终止。")
@@ -1368,10 +1492,28 @@ class RemoteHTTPSandboxBackend:
         self.transport = transport
         self.timeout_buffer_seconds = timeout_buffer_seconds
 
-    def execute(self, payload: dict[str, Any], *, timeout: float = 40.0) -> dict[str, Any]:
+    def execute(
+        self,
+        payload: dict[str, Any],
+        *,
+        timeout: float = 40.0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         import httpx
 
-        headers = {"Content-Type": "application/json"}
+        if cancel_event is not None and cancel_event.is_set():
+            return {
+                "ok": False,
+                "code": "sandbox_cancelled",
+                "cancelled": True,
+                "tests_executed": False,
+                "error": "沙箱测试已取消。",
+                "isolation": "remote_http_sandbox",
+            }
+        headers = {
+            "Content-Type": "application/json",
+            "traceparent": format_traceparent(get_trace_id()),
+        }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         try:

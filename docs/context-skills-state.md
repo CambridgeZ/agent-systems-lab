@@ -14,7 +14,8 @@
 | 当前推理上下文 | 每轮临时构建的 `system + tools + messages` | 让模型选择下一步 | 从上下文移除不等于删除数据库记录 |
 | 结构化工作记忆 | `metadata.working_memory`：带文件/工具哈希校验的 `goal/constraints/todos/facts` | 跨裁剪保留待办与可重验事实；源码变更后自动标 `stale` | 不能绑定失败调用，也不替代提案审批记录 |
 | 活动 Skill 快照 | `metadata.active_skills`：初始快照置前，运行期动态加载快照置尾 | 保持本次任务选定的操作方法与版本，保护历史 KV 前缀 | 不能授予新工具权限 |
-| 用户记忆 | `memories` 表 | 用户显式保存的跨任务笔记 | 不保证事实仍然有效，模型没有自主写入权限 |
+| 跨会话分层记忆与 Wiki | `.agent-lab/agent_memory/<tenant>/`（`global` + `projects/<slug>`）+ `dream_runs` 表 | Step 0 预载有界 `MEMORY.md`（`<=200` 行），在线写独立 `rules/traps/wiki` 页与 `memory_tag`，会话后离线 `DreamEngine` 四阶段对照 Transcript 纠错、修断链与重平衡索引（详见[专题手册](computer-use-and-memory-architecture.md)） | 记忆仍作为低信任参考（`user` 角色），不能覆盖系统安全策略或绕过工具权限 |
+| 显式键值偏好笔记 | `memories` 表 | 用户通过 API/UI 显式保存的跨任务偏好，自动并入记忆索引与混合 RRF 检索 | 不替代当前工作区源码的实时读取核验 |
 
 例如：上轮 `repo_read` 返回了完整文件，数据库保留结果；本轮模型可能只收到路径、结果摘要哈希、短摘录和取回方法。模型需要某段代码时继续读页，不能因为“数据库里有”就假设“本轮模型也看到了”。
 

@@ -203,10 +203,109 @@ def _to_content_blocks(content: str | list[dict]) -> list[dict]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     copied = deepcopy(content)
+    sanitized: list[dict] = []
     for block in copied:
-        if isinstance(block, dict) and block.get("type") in _NON_CACHEABLE_BLOCK_TYPES:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype in _NON_CACHEABLE_BLOCK_TYPES:
             block.pop("cache_control", None)
-    return copied
+            sanitized.append(block)
+        elif btype == "compaction":
+            comp_blk: dict[str, Any] = {"type": "compaction"}
+            raw_content = block.get("content")
+            if isinstance(raw_content, str):
+                comp_blk["content"] = raw_content if raw_content != "" else None
+            elif raw_content is None and "content" in block:
+                comp_blk["content"] = None
+            elif raw_content is not None:
+                comp_blk["content"] = str(raw_content)
+            if block.get("encrypted_content") is not None:
+                comp_blk["encrypted_content"] = str(block["encrypted_content"])
+            if block.get("cache_control") is not None:
+                comp_blk["cache_control"] = block["cache_control"]
+            sanitized.append(comp_blk)
+        else:
+            sanitized.append(block)
+    return sanitized
+
+
+def _is_cacheable_block(block: dict[str, Any]) -> bool:
+    btype = block.get("type")
+    if btype in _NON_CACHEABLE_BLOCK_TYPES:
+        return False
+    if btype == "compaction" and not block.get("content") and not block.get("encrypted_content"):
+        return False
+    return True
+
+
+def build_anthropic_context_management(
+    *,
+    enable_tool_clearing: bool = False,
+    enable_thinking_clearing: bool = False,
+    enable_server_compaction: bool = False,
+    trigger_tokens: int = 150_000,
+    keep_recent_tool_uses: int = 4,
+    keep_recent_thinking_turns: int = 1,
+    clear_tool_inputs: bool = False,
+    exclude_tools: list[str] | None = None,
+    compaction_instructions: str | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """构造 Anthropic 原生上下文工程配置（context_management.edits）及对应 Beta 请求头列表。
+
+    规则与顺序约束：
+    - 默认全部开关为 False 时返回 `(None, [])`，对既有请求 100% 零改动；
+    - 策略顺序遵循 Anthropic 服务端要求：`clear_thinking_20251015` 必须排在 `clear_tool_uses_20250919` 之前，
+      `compact_20260112` 位于末尾作为上下文超限时的服务端压缩兜底；
+    - 自动去重并按稳定顺序返回必需的 `anthropic-beta` 标识（`context-management-2025-06-27` / `compact-2026-01-12`）。
+    """
+    edits: list[dict[str, Any]] = []
+    betas: list[str] = []
+    safe_trigger = max(1, int(trigger_tokens))
+
+    if enable_thinking_clearing:
+        edits.append(
+            {
+                "type": "clear_thinking_20251015",
+                "keep": {
+                    "type": "thinking_turns",
+                    "value": max(1, int(keep_recent_thinking_turns)),
+                },
+            }
+        )
+        if "context-management-2025-06-27" not in betas:
+            betas.append("context-management-2025-06-27")
+
+    if enable_tool_clearing:
+        tool_edit: dict[str, Any] = {
+            "type": "clear_tool_uses_20250919",
+            "trigger": {"type": "input_tokens", "value": safe_trigger},
+            "keep": {"type": "tool_uses", "value": max(0, int(keep_recent_tool_uses))},
+        }
+        if clear_tool_inputs:
+            tool_edit["clear_tool_inputs"] = True
+        if exclude_tools:
+            cleaned_excludes = [str(t).strip() for t in exclude_tools if isinstance(t, str) and t.strip()]
+            if cleaned_excludes:
+                tool_edit["exclude_tools"] = cleaned_excludes
+        edits.append(tool_edit)
+        if "context-management-2025-06-27" not in betas:
+            betas.append("context-management-2025-06-27")
+
+    if enable_server_compaction:
+        compact_edit: dict[str, Any] = {
+            "type": "compact_20260112",
+            "trigger": {"type": "input_tokens", "value": safe_trigger},
+        }
+        if isinstance(compaction_instructions, str) and compaction_instructions.strip():
+            compact_edit["instructions"] = compaction_instructions.strip()
+        edits.append(compact_edit)
+        if "compact-2026-01-12" not in betas:
+            betas.append("compact-2026-01-12")
+
+    if not edits:
+        return None, []
+    return {"edits": edits}, betas
 
 
 def build_anthropic_cached_payload(
@@ -224,7 +323,7 @@ def build_anthropic_cached_payload(
     1. tools[-1]：缓存整套规范化工具 JSON Schema；
     2. system[0]（共享基础系统提示）：主协调者与只读子 Agent 共享同一缓存前缀；
     3. 尾部瞬态状态之前的最后一个稳定历史内容块：使每步新增工具往返命中滚动历史缓存。
-       若目标块为 thinking / redacted_thinking，则向前回退至最近的 text / tool_use / tool_result 块。
+       若目标块为 thinking / redacted_thinking，则向前回退至最近的 text / tool_use / tool_result / compaction 块。
     """
     cached_tools = canonical_tools(tools)
     if cached_tools:
@@ -258,7 +357,7 @@ def build_anthropic_cached_payload(
         placed = False
         for b_idx in range(blk_idx, -1, -1):
             candidate = coalesced[msg_idx]["content"][b_idx]
-            if candidate.get("type") not in _NON_CACHEABLE_BLOCK_TYPES:
+            if _is_cacheable_block(candidate):
                 candidate["cache_control"] = {"type": "ephemeral"}
                 placed = True
                 break
@@ -266,7 +365,7 @@ def build_anthropic_cached_payload(
             for m_idx in range(msg_idx - 1, -1, -1):
                 msg_blocks = coalesced[m_idx]["content"]
                 for b_idx in range(len(msg_blocks) - 1, -1, -1):
-                    if msg_blocks[b_idx].get("type") not in _NON_CACHEABLE_BLOCK_TYPES:
+                    if _is_cacheable_block(msg_blocks[b_idx]):
                         msg_blocks[b_idx]["cache_control"] = {"type": "ephemeral"}
                         placed = True
                         break

@@ -1,8 +1,22 @@
-"""面向代码 Agent 的工具接口：读取、检索、提出补丁与隔离验证。
+"""面向代码与本机工作台 Agent 的确定性工具边界：分档挂载、路径防逃逸、审批门控与 WAL 原子落盘。
 
-工具是信任边界，不能只在提示词里写“请不要越权”。此处通过 JSON Schema、
-路径检查、只读测试目录、审批和 compare-and-swap 限制行为。知识库返回的
-文字始终是不可信资料，不能成为授权来源。没有提供任意 shell 或 exec 工具。
+核心安全与系统设计不变量：
+1. 工具注册表即能力安全边界（Capability-Based Security），绝不靠提示词“恳求模型自律”：
+   - 默认 sandbox 档位严格只挂载 11 个受控研发工具（只读检索、AST 代码地图、单文件/多文件补丁提案、
+     AST 语法校验与禁网只读 Docker 容器测试），完全不暴露任意 Shell 或直接写盘入口；
+   - 仅当显式 opt-in 进入 host / computer 档位时，才按需增量挂载 HOST_TOOL_SPECS（fs_* / bash_exec）
+     与 COMPUTER_TOOL_SPECS（computer_screen / mouse / keyboard）。未挂载工具既不进入 <TOOLS> 提示词
+     （节省上下文预算并保持沙箱评测 KV Cache 前缀稳定），也在 execute() 入口被白名单校验直接拦截；
+   - apply_proposal 永远不出现在 definitions() 与 _validators 中，从根源阻断模型通过提示注入“自我审批”。
+2. 符号链接与硬链接的逐级防逃逸校验：
+   - 严禁先调用 Path.resolve() 再检查边界：resolve() 会静默解引用符号链接从而掩盖跳板事实，并引入
+     检查到写入之间的 TOCTOU 竞态窗口；必须从 workspace 根开始逐段检查 is_symlink() 并拒绝 st_nlink != 1
+     的多重硬链接文件（防止将业务文件硬链接到受保护的 tests/ 或敏感密钥文件绕过写入禁令）。
+3. 统一提案应用器（apply_proposal）的双轨幂等与崩溃恢复协议：
+   - 文件类提案（propose_patch / propose_changeset / ask 模式下的 fs_write 与 fs_edit）通过跨进程
+     inode 校验 flock + SHA-256 CAS 比对 + 写前恢复日志（.agent-apply-*.json）实现多文件崩溃前滚恢复；
+   - 动作类提案（bash_exec 命令与 computer_* 桌面动作）通过 mark_action_proposal_executed 持久化执行回执，
+     保证进程在动作完成后、对话历史落盘前崩溃重放时绝不二次执行非幂等 Shell 命令或鼠标点击。
 """
 
 from __future__ import annotations
@@ -131,6 +145,13 @@ def prune_workspace_lock(workspace: Path) -> None:
 
 @contextlib.contextmanager
 def _cross_process_apply_lock(storage_path: Path, workspace: Path) -> Iterator[None]:
+    """基于工作区路径哈希的跨进程排他文件锁，防范 O_NOFOLLOW 符号链接劫持与 flock+unlink 竞态。
+
+    为什么获得 flock 后必须再次核对 fstat(fd) 与 stat(lock_file, follow_symlinks=False) 的 dev/inode：
+    若后台 GC 恰好在本进程 open() 之后、flock() 阻塞等待期间 unlink 了锁文件，本进程锁住的将是
+    已被摘除目录项的孤儿 inode，而另一新进程会在同名路径创建新 inode 并同时进锁导致互斥失效。
+    一旦检测到 st_nlink != 1 或 inode 漂移，立即解锁关闭并重试，最多 4 次。
+    """
     locks_dir = Path(storage_path).parent / "apply_locks"
     if locks_dir.is_symlink():
         raise ToolError("unsafe_path", "跨进程补丁锁目录不能是符号链接。")
@@ -207,7 +228,13 @@ def _string(description: str, maximum: int = 500) -> dict:
 
 
 class ToolRegistry:
-    """一个运行对应一个 Registry；审批入口不在 definitions() 中暴露给模型。"""
+    """运行级工具注册表与策略执行网关：按执行档位（sandbox / host / computer）最小化挂载能力面。
+
+    - sandbox（默认）：仅暴露 _build_definitions() 中的 11 个隔离研发工具；
+    - host：追加 HOST_TOOL_SPECS（全功能 fs_* 与受三级权限门控保护的 bash_exec）；
+    - computer（或 enable_gui=True）：进一步追加 COMPUTER_TOOL_SPECS（截屏、鼠标、键盘 GUI 自动化）；
+    - 审批落地入口 apply_proposal 绝不注册进 _specs / _validators，仅能由 Runtime 核实人类审批后内部调用。
+    """
 
     def __init__(
         self,
@@ -227,6 +254,7 @@ class ToolRegistry:
         artifacts_dir: Path | None = None,
     ):
         self.storage = storage
+        # 必须先以 absolute() 检查末端本身是否为符号链接，拒绝把指向系统敏感目录的软链当作工作区根。
         self.workspace = Path(workspace).absolute()
         if self.workspace.is_symlink() or not self.workspace.is_dir():
             raise ValueError("workspace 必须是已存在的真实目录")
@@ -257,6 +285,10 @@ class ToolRegistry:
                 _LOCKS.move_to_end(ws_key)
             _evict_unlocked_locks()
             self._lock = lock
+        # 默认 sandbox 档位严格锁定 11 个基础工具，不混入宿主机终端或 GUI schema：
+        # 1. 防止模型幻觉尝试无权限工具白白消耗步数预算；
+        # 2. 保持沙箱基准测试的 <TOOLS> 字节流与优化前完全一致，避免破坏前缀 KV Cache。
+        # 通过 json.loads(json.dumps(...)) 深拷贝静态 schema 常量，防止下游注入 cache_control 污染全局字典。
         base_specs = self._build_definitions()
         if self.execution_profile in {"host", "computer"}:
             base_specs = base_specs + json.loads(json.dumps(HOST_TOOL_SPECS))
@@ -414,13 +446,17 @@ class ToolRegistry:
         return json.loads(json.dumps(self._specs))
 
     def _get_computer_backend(self) -> ComputerBackend:
+        """惰性初始化桌面 GUI 后端：非 GUI 任务不触发 macOS Quartz / CoreGraphics ctypes 动态库加载。"""
         if self._computer_backend is None:
             self._computer_backend = get_default_computer_backend()
         return self._computer_backend
 
     def execute(self, name: str, arguments: dict, call_id: str | None = None) -> dict:
+        """统一执行入口：先过白名单与 JSON Schema 硬校验，再分发至受控工具并写入审计轨迹。"""
         started = time.monotonic()
         try:
+            # 第一道防线：未挂载到当前 execution_profile 的工具（以及内部私有方法如 apply_proposal）
+            # 不在 _validators 中，任何伪造工具名调用直接被拦截，绝不会走到底层 getattr 反射。
             if name not in self._validators:
                 raise ToolError("unknown_tool", "工具不存在，不能动态执行函数名。")
             self._validators[name].validate(arguments)
@@ -503,7 +539,14 @@ class ToolRegistry:
     def _validate_relpath(
         self, relative: str, *, editable: bool = False, allow_config: bool = False
     ) -> tuple[PurePosixPath, Path]:
-        # 不先 resolve 再判断链接：resolve 会隐藏符号链接这一事实。
+        """校验仓库内相对路径，逐级阻断符号链接跳板、越界访问、敏感文件读取与验收测试篡改。
+
+        为什么绝不能先调用 candidate.resolve() 再做检查：
+        1. Path.resolve() 会跟随整条路径上的所有 symlink，若仓库内存在指向敏感文件（甚至指向仓库内
+           tests/test_pricing.py）的软链，先 resolve 会彻底丢失“路径经过符号链接”的事实；
+        2. 逐段拼接并检查 candidate.is_symlink() 能在第一处软链即刻阻断，最后再用 resolve().is_relative_to()
+           做规范化包含性兜底，形成双层纵深防御。
+        """
         if not relative or "\\" in relative or ":" in relative or "\x00" in relative:
             raise ToolError("unsafe_path", "路径必须是仓库内相对路径。")
         pure = PurePosixPath(relative)
@@ -726,6 +769,27 @@ class ToolRegistry:
             if original.count(crlf_old) == 1:
                 crlf_new = new_text.replace("\r\n", "\n").replace("\n", "\r\n")
                 return original.replace(crlf_old, crlf_new, 1)
+        # Tier 3: 行尾空白容忍唯一窗口匹配（仅当唯一命中时才生效，保持零歧义不变量）
+        dominant_nl = "\r\n" if "\r\n" in original else "\n"
+        norm_orig = original.replace("\r\n", "\n")
+        norm_old = old_text.replace("\r\n", "\n")
+        norm_new = new_text.replace("\r\n", "\n")
+        orig_lines = norm_orig.splitlines(keepends=True)
+        old_lines = norm_old.splitlines(keepends=False)
+        if old_lines and len(old_lines) <= len(orig_lines):
+            win_len = len(old_lines)
+            old_trimmed = [ln.rstrip(" \t") for ln in old_lines]
+            hits = [
+                i
+                for i in range(len(orig_lines) - win_len + 1)
+                if [orig_lines[i + j].rstrip("\r\n").rstrip(" \t") for j in range(win_len)] == old_trimmed
+            ]
+            if len(hits) == 1:
+                hit = hits[0]
+                had_nl = orig_lines[hit + win_len - 1].endswith("\n")
+                rep = norm_new + ("\n" if had_nl and norm_new and not norm_new.endswith("\n") else "")
+                rebuilt = "".join(orig_lines[:hit]) + rep + "".join(orig_lines[hit + win_len :])
+                return rebuilt.replace("\n", "\r\n") if dominant_nl == "\r\n" else rebuilt
         return None
 
     @staticmethod
@@ -971,7 +1035,18 @@ class ToolRegistry:
                     os.unlink(tmp_journal)
 
     def apply_proposal(self, proposal_id: str, expected_epoch: int | None = None) -> dict:
-        """审批后的跨进程互斥与写前日志（WAL）多文件崩溃前滚恢复写入（及已批准命令/GUI 动作执行）。"""
+        """统一执行获人类批准的提案：串联幂等动作执行（command / gui_action）与多文件 WAL CAS 原子写入。
+
+        为什么将两类提案收敛到同一状态机入口：
+        1. 动作类提案（终端命令 / 桌面点击）：不持有工作区文件补丁锁（避免长耗时命令阻塞并发读），但依赖
+           applied + execution_result 持久回执实现“至多执行一次”语义；若动作跑完但进程在写入对话消息前
+           崩溃，resume() 重入时会返回缓存的 execution_result（already_applied=True），绝不重跑命令。
+        2. 文件类提案（单文件 / 多文件原子变更集 / ask 模式下的 fs_write 与 fs_edit）：
+           - 必须在进程内 RLock + 跨进程 flock 双重互斥下校验 epoch 与目标文件当前 SHA-256（CAS）；
+           - 置换前先 fsync 写入恢复日志 .agent-apply-<pid>.json：若多文件 os.replace 中途遭遇断电或 SIGKILL，
+             下次恢复时检测到部分文件已达目标哈希（m_post）而其余仍处基线哈希（m_pre），会自动跳过已完成项并
+             前滚（roll-forward）剩余待写文件，消除“半截跨文件补丁”导致仓库处于不可编译中间态的风险。
+        """
         epoch = expected_epoch if expected_epoch is not None else self.expected_epoch
         self.storage.verify_epoch(self.run_id, epoch)
         pre_prop = self.storage.get_proposal(proposal_id)
@@ -981,7 +1056,9 @@ class ToolRegistry:
             return {"ok": False, "code": "approval_required", "error": "补丁尚未获人类批准。"}
 
         prop_kind = pre_prop.get("kind")
+        # 分支一：非文件副作用动作（Shell 命令或 GUI 键鼠动作）的幂等执行与回执归档
         if prop_kind in {"command", "gui_action"}:
+            # 崩溃重入保护：若上次尝试已完成执行并持久化了 execution_result，直接原样回放，防止重复触发副作用
             if pre_prop.get("applied") and isinstance(pre_prop.get("execution_result"), dict):
                 return {**pre_prop["execution_result"], "proposal_id": proposal_id, "already_applied": True}
             args_payload = dict(pre_prop.get("arguments") or {})
@@ -1006,6 +1083,7 @@ class ToolRegistry:
                         },
                     )
                 else:
+                    # bypass_approval=True：已经过人类显式批准，直通底层电脑控制后端执行
                     exec_res = execute_computer_tool(
                         self._get_computer_backend(),
                         self.storage,
@@ -1021,6 +1099,7 @@ class ToolRegistry:
                 self.storage.mark_action_proposal_executed(proposal_id, exec_res, expected_epoch=epoch)
                 return {**exec_res, "proposal_id": proposal_id, "already_applied": False}
             except (HostToolError, ComputerToolError, ToolError) as exc:
+                # 确定性工具异常同样记为“本次获批尝试已消费”，把错误回执交还给模型诊断而非死卡审批态
                 err_res = {"ok": False, "code": exc.code, "error": str(exc)}
                 self.storage.mark_action_proposal_executed(proposal_id, err_res, expected_epoch=epoch)
                 return {**err_res, "proposal_id": proposal_id}
@@ -1029,6 +1108,7 @@ class ToolRegistry:
                 self.storage.mark_action_proposal_executed(proposal_id, err_res, expected_epoch=epoch)
                 return {**err_res, "proposal_id": proposal_id}
 
+        # 分支二：文件补丁与多文件原子变更集（跨进程锁 + CAS 校验 + WAL 写前日志恢复）
         with self._lock, _cross_process_apply_lock(self.storage.path, self.workspace):
             self.storage.verify_epoch(self.run_id, epoch)
             proposal = self.storage.get_proposal(proposal_id)
@@ -1043,6 +1123,8 @@ class ToolRegistry:
                     raise ToolError("unsafe_path", "恢复日志不能是符号链接。")
                 if proposal.get("base_commit"):
                     verify_worktree_baseline(self.workspace, proposal["base_commit"])
+                # 兼容 host/computer 档位 ask 模式下由 fs_write / fs_edit 生成的文件审批提案
+                # （放宽至 512 KiB 上限并走宿主工作区路径解析规则）
                 allow_host_fs = proposal.get("tool") in {"fs_write", "fs_edit"}
                 allow_config = (
                     allow_host_fs
@@ -1072,6 +1154,7 @@ class ToolRegistry:
                         (entry, target, cur_state, exp_pre, exp_post, cur_state == exp_pre, cur_state == exp_post)
                     )
 
+                # 情况 A：所有文件均已达提案后状态（上次写盘后更新 DB 前崩溃），幂等补齐标记即可
                 if all(m_post for *_, m_post in inspected):
                     self.storage.mark_proposal_applied(proposal_id, expected_epoch=epoch)
                     if journal_path.is_file():
@@ -1083,11 +1166,13 @@ class ToolRegistry:
                         "paths": paths,
                         "already_applied": True,
                     }
+                # 情况 B：任一文件既非修改前哈希也非修改后哈希（外部并发修改），触发 CAS 冲突拒绝覆盖
                 if proposal["applied"] or any(not (m_pre or m_post) for *_, m_pre, m_post in inspected):
                     raise ToolError(
                         "version_conflict", "审批后文件发生变化，拒绝覆盖；请重新读取并提出补丁。"
                     )
 
+                # 情况 C：全部处于 m_pre（全新写入），或 m_pre/m_post 混合态（按 WAL 日志前滚未完成项）
                 has_journal = journal_path.is_file()
                 recovered_partial = has_journal or any(m_post for *_, m_post in inspected)
                 pending = [(entry, target) for entry, target, *_, m_post in inspected if not m_post]

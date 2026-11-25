@@ -178,7 +178,7 @@
 
 **追问：**用户要求删除某条信息，摘要、向量索引、缓存里仍有副本怎么办？
 
-**项目对照：**跨会话 `memories` 表保持用户显式键值笔记；任务内[结构化工作记忆](../src/agent_lab/working_memory.py)则强制校验每条 `fact` 引用的文件或 `tool_calls` SHA-256，并在目标文件被补丁修改后自动将旧事实标为 `stale`（`file_hash_changed`，见 [`test_working_memory.py`](../tests/test_working_memory.py)）。跨会话记忆的向量索引级撤回传播仍属于扩展。
+**项目对照：**项目实现了双层防污染闭环：（1）任务内[结构化工作记忆](../src/agent_lab/working_memory.py)强制校验每条 `fact` 关联的文件或 `tool_calls` SHA-256，源码变更后自动标为 `stale`（见 [`test_working_memory.py`](../tests/test_working_memory.py)）；（2）跨会话[分层记忆与 Dreaming 引擎](../src/agent_lab/memory.py)在会话完成后对照真实 Transcript 回执与文件哈希审计笔记——绑定失败调用的错误断言自动打上 `status: contradicted` 软墓碑（同时从 `memory_search` 混合检索召回池与顶层 `MEMORY.md` 预载索引中剔除，并保留历史文件头供审计），带 `mistake` 显著性标记的方向性错误则被自动订正重写（见 [`test_agent_memory_and_dreaming.py`](../tests/test_agent_memory_and_dreaming.py)）。
 
 ## 十一、代码 Agent 的评测与观察
 

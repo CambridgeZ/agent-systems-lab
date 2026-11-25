@@ -4,53 +4,362 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Agent Systems Lab · 代码开发工作台</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232d634c'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Georgia,serif' font-size='15' font-weight='bold' fill='%23f7f8f3'%3Easl%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/static/style.css?v=11" />
   </head>
   <body>
-    <aside class="sidebar">
-      <a class="brand" href="/">a<span>sl</span><i>实验项目 / 01</i></a>
+    <aside class="sidebar" id="sidebar" aria-label="会话导航">
+      <div class="sidebar-top-row">
+        <a class="brand" href="/">a<span>sl</span><i>实验项目 / 01</i></a>
+        <button
+          type="button"
+          id="sidebar-close-btn"
+          class="sidebar-close-btn"
+          title="收起侧边栏"
+          aria-label="收起侧边栏"
+        >
+          ✕
+        </button>
+      </div>
       <div class="workspace-label">开发者学习工作台</div>
-      <div class="nav-active">◈ &nbsp; 代码任务</div>
-      <a class="nav" href="/docs" target="_blank">⌘ &nbsp; API 文档 ↗</a>
+      <button
+        type="button"
+        class="nav-active new-agent-btn"
+        id="new-agent-btn"
+        title="开启一个新的并行 Agent 会话"
+      >
+        ＋ &nbsp; 新建并行 Agent
+      </button>
+      <a class="nav" href="/docs" target="_blank" rel="noopener noreferrer">⌘ &nbsp; API 文档 ↗</a>
       <div class="section-label">
-        最近的运行 <button id="refresh" title="刷新">↻</button>
+        <span>并行与最近会话</span>
+        <button type="button" id="refresh" title="刷新会话列表" aria-label="刷新会话列表">↻</button>
+      </div>
+      <div class="sidebar-filters">
+        <label class="sr-only" for="run-search-input">搜索会话</label>
+        <input
+          id="run-search-input"
+          type="search"
+          placeholder="搜索会话标题或内容…"
+          autocomplete="off"
+        />
+        <label class="sr-only" for="run-status-filter">按状态筛选</label>
+        <select id="run-status-filter" aria-label="按状态筛选会话">
+          <option value="">全部活跃会话</option>
+          <option value="running">运行中</option>
+          <option value="waiting_approval">等待审批</option>
+          <option value="completed">已完成</option>
+          <option value="failed">失败 / 异常</option>
+          <option value="cancelled">已取消</option>
+          <option value="archived">仅已归档</option>
+          <option value="all_with_archived">全部（含归档）</option>
+        </select>
       </div>
       <div id="runs" class="runs"><div class="muted">还没有运行记录</div></div>
       <div class="sidebar-bottom">
         <span class="dot"></span><span id="provider">正在连接服务</span
-        ><button id="auth" title="设置本次会话的 API Token">⚿</button>
+        ><button type="button" id="auth" title="认证与会话令牌设置" aria-label="认证与会话令牌设置">
+          ⚿
+        </button>
       </div>
     </aside>
+    <div id="sidebar-backdrop" class="sidebar-backdrop hidden" aria-hidden="true"></div>
     <main>
       <header>
-        <div class="crumb">
-          Agent Systems Lab <span>/</span> Coding workspace
+        <div class="header-left">
+          <button
+            type="button"
+            id="sidebar-toggle-btn"
+            class="sidebar-toggle-btn"
+            title="打开会话列表"
+            aria-label="打开会话侧边栏"
+            aria-expanded="false"
+            aria-controls="sidebar"
+          >
+            ☰
+          </button>
+          <button
+            type="button"
+            id="desktop-sidebar-toggle"
+            class="header-icon-btn desktop-only-btn"
+            title="收起 / 展开左侧会话栏"
+            aria-label="收起或展开左侧会话栏"
+            aria-expanded="true"
+            aria-controls="sidebar"
+          >
+            ◧
+          </button>
+          <div class="crumb">Agent Systems Lab <span>/</span> Coding workspace</div>
         </div>
-        <div class="badge">可恢复 · 可观察 · 人工审批</div>
+        <div class="header-right">
+          <button
+            type="button"
+            id="cmd-palette-btn"
+            class="header-action-btn"
+            title="打开快捷命令面板 (⌘K / Ctrl+K)"
+            aria-label="打开命令面板"
+          >
+            <kbd class="kbd-chip">⌘K</kbd><span class="header-action-label">命令面板</span>
+          </button>
+          <button
+            type="button"
+            id="notify-toggle-btn"
+            class="header-action-btn"
+            title="开启或关闭任务完成 / 待审批桌面通知"
+            aria-label="切换桌面通知提醒"
+            aria-pressed="false"
+          >
+            <span aria-hidden="true">◉</span><span class="header-action-label">通知提醒</span>
+          </button>
+          <button
+            type="button"
+            id="help-guide-btn"
+            class="header-action-btn"
+            title="查看系统架构、学习提示与快捷键指南"
+            aria-label="打开帮助指南"
+          >
+            <span aria-hidden="true">?</span><span class="header-action-label">帮助指南</span>
+          </button>
+          <div class="theme-switcher" role="group" aria-label="界面风格切换">
+            <button
+              type="button"
+              class="theme-btn active"
+              data-theme="editorial"
+              title="松霜雅致（默认）"
+            >
+              松霜
+            </button>
+            <button type="button" class="theme-btn" data-theme="dark" title="极客暗夜（Dark）">
+              暗夜
+            </button>
+            <button type="button" class="theme-btn" data-theme="ocean" title="科技深海（Ocean）">
+              深海
+            </button>
+            <button type="button" class="theme-btn" data-theme="warm" title="琥珀暖砂（Warm）">
+              暖砂
+            </button>
+          </div>
+          <button
+            type="button"
+            id="inspector-toggle-btn"
+            class="header-icon-btn"
+            title="收起 / 展开右侧检视面板"
+            aria-label="收起或展开右侧检视面板"
+            aria-expanded="true"
+            aria-controls="right-inspector"
+          >
+            ◫
+          </button>
+        </div>
       </header>
       <div class="content">
-        <section class="intro">
-          <div class="eyebrow">从一处 BUG，理解完整的 AGENT 系统</div>
+        <section class="intro" id="intro-hero">
+          <div class="intro-top-row">
+            <div class="eyebrow">从一处 BUG，理解完整的 AGENT 系统</div>
+            <div class="intro-actions">
+              <button
+                type="button"
+                id="cap-toggle-btn"
+                class="button secondary btn-compact"
+                aria-expanded="false"
+                aria-controls="cap-panel"
+              >
+                系统能力一览 ▾
+              </button>
+              <button
+                type="button"
+                id="dismiss-intro-btn"
+                class="icon-mini-btn"
+                title="收起顶部介绍横幅"
+                aria-label="收起顶部介绍横幅"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
           <h1>让代码变更，<em>有据可循。</em></h1>
           <p>
-            阅读代码 → 检索知识 → 提出补丁 → 人工审批 → 验证结果。<br />在同一条执行轨迹里，观察模型、工具和执行框架如何配合。
+            阅读代码 → 检索知识 → 提出补丁 → 人工审批 → 验证结果。在同一条执行轨迹里，观察模型、工具和执行框架如何配合。
           </p>
-          <div class="capabilities">
-            <span>Host Bash + FS</span><span>Desktop GUI Use</span><span>Dreaming + Wiki Memory</span
-            ><span>Subagents + MCP Client</span><span>3-Tier Permissions</span><span>Git Worktree</span>
+          <div id="cap-panel" class="capabilities hidden">
+            <span class="cap-highlight">SSE Live Stream</span
+            ><span class="cap-highlight">Checkpoints &amp; Rewind</span
+            ><span class="cap-highlight">CLAUDE.md + MEMORY.md</span
+            ><span class="cap-highlight">Auto Compaction (80%→55%)</span
+            ><span class="cap-highlight">Live Mid-Run Steering</span><span>Host Bash + FS</span
+            ><span>Desktop GUI Use</span><span>Dreaming Preview &amp; Rollback</span
+            ><span>Subagents + Deferred MCP</span><span>USD Cost Budget</span
+            ><span>Git Worktree</span>
           </div>
         </section>
+
+        <section id="active-session-bar" class="active-session-bar" aria-label="当前会话信息">
+          <div class="active-session-meta">
+            <span id="active-session-title" class="active-session-title">当前会话</span>
+            <span id="active-workspace-pill" class="session-pill" title="当前会话工作区"
+              >工作区</span
+            >
+            <span
+              id="active-model-pill"
+              class="session-pill session-pill-accent"
+              title="当前会话模型"
+              >默认模型</span
+            >
+          </div>
+          <div class="active-session-actions">
+            <button
+              type="button"
+              id="header-new-agent-btn"
+              class="button primary-button btn-compact"
+              title="新建并行 Agent 任务"
+            >
+              ＋ 新建任务
+            </button>
+            <button
+              type="button"
+              id="session-inspector-toggle-btn"
+              class="button secondary btn-compact"
+              title="展开或收起右侧检视面板"
+              aria-label="展开或收起右侧检视面板"
+              aria-expanded="true"
+              aria-controls="right-inspector"
+            >
+              ◫ 检视面板
+            </button>
+          </div>
+        </section>
+
         <div class="layout">
           <div class="primary">
-            <section class="card composer">
+            <div
+              id="sticky-approval-bar"
+              class="sticky-approval-bar hidden"
+              role="region"
+              aria-label="待审批快速操作栏"
+            >
+              <div class="sticky-approval-info">
+                <span class="sticky-approval-dot" aria-hidden="true">!</span>
+                <span id="sticky-approval-text">有待人工确认的动作或补丁，等待你的决定</span>
+              </div>
+              <div class="sticky-approval-actions">
+                <button
+                  type="button"
+                  id="sticky-jump-approval"
+                  class="button secondary btn-compact"
+                >
+                  查看 Diff
+                </button>
+                <button type="button" id="sticky-reject-btn" class="button danger btn-compact">
+                  拒绝
+                </button>
+                <button
+                  type="button"
+                  id="sticky-approve-btn"
+                  class="button primary-button btn-compact"
+                >
+                  批准并继续 ↗
+                </button>
+              </div>
+            </div>
+
+            <section class="card composer" id="new-task-card">
               <div class="card-heading">
                 <span><b class="tiny-icon">↗</b> 新建开发任务</span
                 ><span class="small muted" id="template-badge">独立示例副本 / Git Worktree</span>
               </div>
-              <label class="sr-only" for="prompt">任务描述</label
-              ><textarea id="prompt" rows="3">
-修复 pricing.py 的百分比折扣 bug，并验证修改。</textarea
-              >
+              <label class="sr-only" for="prompt">任务描述</label>
+              <textarea
+                id="prompt"
+                rows="3"
+                placeholder="输入开发任务描述，支持 /skill 技能命令、@path 文件引用或拖拽文件附加…"
+              >修复 pricing.py 的百分比折扣 bug，并验证修改。</textarea>
+              <div class="attachment-bar">
+                <input
+                  id="attachment-input"
+                  type="file"
+                  class="sr-only"
+                  multiple
+                  accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md"
+                />
+                <button
+                  type="button"
+                  id="attach-btn"
+                  class="button secondary btn-compact"
+                  title="附加图片、PDF 或文本文件（单文件上限 6 MiB，也支持直接拖拽至输入框）"
+                >
+                  📎 添加附件
+                </button>
+                <div id="composer-attachments" class="attachment-chips"></div>
+              </div>
+
+              <div id="local-cwd-row" class="local-cwd-row hidden">
+                <label for="workspace-path">本地目标目录</label>
+                <input
+                  id="workspace-path"
+                  type="text"
+                  placeholder="例如 /path/to/your-project（留空默认当前服务根目录）"
+                />
+                <button
+                  type="button"
+                  id="browse-cwd-btn"
+                  class="button secondary btn-compact"
+                  title="打开受控目录浏览器选择工作区"
+                >
+                  浏览目录
+                </button>
+              </div>
+
+              <div class="composer-advanced-wrap">
+                <button
+                  type="button"
+                  id="composer-advanced-toggle"
+                  class="composer-advanced-toggle"
+                  aria-expanded="false"
+                  aria-controls="composer-advanced-panel"
+                >
+                  <span class="advanced-toggle-title">高级选项 ▾</span>
+                  <span id="composer-advanced-summary" class="advanced-summary-pill"
+                    >预算不限 · Auto-Edit</span
+                  >
+                </button>
+                <div id="composer-advanced-panel" class="composer-advanced-panel hidden">
+                  <label
+                    >费用上限 ($)
+                    <input
+                      id="max-cost-usd"
+                      type="number"
+                      min="0.01"
+                      max="1000"
+                      step="0.05"
+                      placeholder="不限"
+                      class="budget-input"
+                    />
+                  </label>
+                  <label id="perm-wrap" class="hidden"
+                    >权限策略
+                    <select id="permission-mode">
+                      <option value="auto-edit" selected>Auto-Edit · 自动改文件/审命令</option>
+                      <option value="ask">Ask · 写文件与跑命令均需确认</option>
+                      <option value="full-auto">Full-Auto · 全自动自主执行</option>
+                      <option value="plan">Plan · 只读规划（先出方案再执行）</option>
+                    </select>
+                  </label>
+                  <label id="gui-wrap" class="checkbox-label hidden"
+                    ><input type="checkbox" id="enable-gui" /> 启用桌面 GUI 操控</label
+                  >
+                  <label
+                    id="wt-wrap"
+                    class="checkbox-label hidden"
+                    title="勾选后基于该 Git 仓库创建独立并发 Worktree，多个 Agent 同时改代码互不冲突"
+                    ><input type="checkbox" id="isolate-worktree" /> 独立 Worktree 隔离</label
+                  >
+                </div>
+              </div>
+
               <div class="composer-footer">
                 <div class="composer-selects">
                   <label
@@ -59,216 +368,697 @@
                       <option value="sample">隔离示例 · pricing.py</option>
                       <option value="multi_file">多文件 Git Worktree · 结算封顶</option>
                       <option value="local_cwd">本地目录直连 · 电脑操控</option>
-                    </select></label
-                  >
+                    </select>
+                  </label>
                   <label
                     >执行模式
                     <select id="mode">
                       <option value="agent">Agent · 模型选择工具</option>
                       <option value="workflow">Workflow · 固定检索前置</option>
                       <option value="parallel">Parallel · 双 Worker 研究</option>
-                    </select></label
-                  >
-                  <label id="perm-wrap" class="hidden"
-                    >权限策略
-                    <select id="permission-mode">
-                      <option value="auto-edit" selected>Auto-Edit · 自动改文件/审命令</option>
-                      <option value="ask">Ask · 写文件与跑命令均需确认</option>
-                      <option value="full-auto">Full-Auto · 全自动自主执行</option>
-                    </select></label
-                  >
-                  <label id="gui-wrap" class="checkbox-label hidden"
-                    ><input type="checkbox" id="enable-gui" /> 启用桌面 GUI 操控</label
-                  >
-                </div
-                ><button class="button primary-button" id="start">
+                    </select>
+                  </label>
+                  <label
+                    >模型
+                    <select id="model-select">
+                      <option value="">默认模型</option>
+                    </select>
+                  </label>
+                </div>
+                <button type="button" class="button primary-button" id="start">
                   开始运行 <span>↗</span>
                 </button>
               </div>
-              <div id="local-cwd-row" class="local-cwd-row hidden">
-                <label for="workspace-path">本地目标目录路径</label>
-                <input
-                  id="workspace-path"
-                  type="text"
-                  placeholder="例如 /path/to/your-project（留空默认当前服务根目录）"
-                />
-              </div>
               <p class="hint" id="demo-note">
-                DEMO 为确定性内置场景；真实 Claude 接入由服务端配置。
+                DEMO 为确定性内置场景；真实 Claude 接入由服务端配置。支持 <code>/</code> 技能补全与
+                <code>@</code> 工作区文件引用。
               </p>
             </section>
+
             <section class="card execution">
               <div class="card-heading">
-                <span><b class="tiny-icon">◎</b> 执行轨迹</span
-                ><span id="status" class="status idle">等待任务</span>
+                <span class="execution-title-wrap"
+                  ><b class="tiny-icon">◎</b> 执行轨迹
+                  <span id="stream-mode-badge" class="stream-pill hidden">SSE 实时流</span></span
+                >
+                <div class="execution-head-right">
+                  <button
+                    type="button"
+                    id="toggle-raw-timeline-btn"
+                    class="button secondary btn-compact hidden"
+                    aria-expanded="false"
+                    aria-controls="timeline"
+                  >
+                    原始事件流 ▾
+                  </button>
+                  <span id="status" class="status idle">等待任务</span>
+                </div>
               </div>
-              <div class="metrics metrics-4">
+              <div class="metrics metrics-5">
                 <div><label>模型轮次</label><strong id="steps">—</strong></div>
                 <div>
                   <label>验证结论 (TESTS)</label><strong id="verification-label">—</strong>
                 </div>
-                <div>
-                  <label>GIT 基线 / 提交</label><strong id="git-label">—</strong>
-                </div>
+                <div><label>GIT 基线 / 提交</label><strong id="git-label">—</strong></div>
                 <div>
                   <label>EPOCH / KV 缓存 / TOKENS</label><strong id="lease-tokens">—</strong>
                 </div>
+                <div><label>USD 费用</label><strong id="cost-usd-label">—</strong></div>
               </div>
+              <div id="checkpoint-fork-bar" class="checkpoint-fork-bar hidden">
+                <div class="checkpoint-group">
+                  <span class="checkpoint-label">⏱ 检查点 <b id="checkpoint-count">0</b></span>
+                  <select id="checkpoint-select" aria-label="选择回退检查点">
+                    <option value="">暂无检查点</option>
+                  </select>
+                  <select id="rewind-scope" aria-label="回退范围">
+                    <option value="both">文件 + 对话</option>
+                    <option value="files">仅回退文件</option>
+                    <option value="messages">仅回退对话</option>
+                  </select>
+                  <button
+                    type="button"
+                    id="rewind-btn"
+                    class="button secondary btn-compact"
+                    disabled
+                    title="将工作区文件与/或对话历史回退到选中检查点"
+                  >
+                    ↶ Rewind
+                  </button>
+                </div>
+                <div class="fork-group">
+                  <button
+                    type="button"
+                    id="fork-run-btn"
+                    class="button secondary btn-compact"
+                    title="从当前会话分叉创建独立新分支"
+                  >
+                    ⑂ Fork 分支
+                  </button>
+                </div>
+              </div>
+              <div id="session-grants-bar" class="session-grants-bar hidden"></div>
+              <div id="run-attachments-bar" class="run-attachments-bar hidden"></div>
               <div id="empty" class="empty">
                 <div class="empty-symbol">⌁</div>
                 <b>每一步，都留下证据</b>
-                <p>启动任务后，在这里查看工具参数、返回结果和审批记录。</p>
+                <p>启动任务后，在这里查看对话回合、工具步骤、Diff 变更和审批记录。</p>
               </div>
+              <div id="chat-thread" class="chat-thread" aria-live="polite"></div>
               <div id="timeline" class="timeline"></div>
-              <button id="resume" class="button secondary hidden">
-                恢复任务 ↻
-              </button>
-              <button id="cancel" class="button danger hidden">取消任务 ✕</button>
+              <div class="run-ctrl-actions">
+                <button type="button" id="resume" class="button secondary hidden">
+                  恢复任务 ↻
+                </button>
+                <button type="button" id="cancel" class="button danger hidden">取消任务 ✕</button>
+              </div>
             </section>
+
+            <section id="live-stream-card" class="card live-stream-card hidden">
+              <div class="card-heading">
+                <span class="live-stream-heading"
+                  ><span class="live-pulse-dot"></span> 实时执行与流式输出</span
+                >
+                <span id="live-stream-badge" class="status running">连接中…</span>
+              </div>
+              <div id="live-tool-strip" class="live-tool-strip hidden" aria-live="polite"></div>
+              <div id="live-subagent-bar" class="live-subagent-bar hidden"></div>
+              <details id="live-thinking-details" class="live-thinking-details hidden">
+                <summary id="live-thinking-summary">Extended Thinking 推理过程</summary>
+                <pre id="live-thinking-pre" class="live-thinking-pre"></pre>
+              </details>
+              <div id="live-stream-answer" class="answer md-body"></div>
+              <details id="live-bash-details" class="terminal-details hidden" open>
+                <summary id="live-bash-summary">实时终端输出流</summary>
+                <pre id="live-bash-pre" class="terminal-out"></pre>
+              </details>
+            </section>
+
             <section id="proposal-card" class="card hidden">
               <div class="card-heading">
                 <span>▤ &nbsp; 待人工确认动作 / 补丁</span
                 ><span class="status waiting_approval">等待你的决定</span>
               </div>
               <p class="hint">
-                批准后才执行命令、GUI 动作或写入工作区文件。文件变更绑定 SHA-256 防止并发覆盖。
+                批准后才执行命令、GUI 动作或写入工作区文件。文件变更绑定 SHA-256 防止并发覆盖，支持按文件勾选与会话模式授权。
               </p>
               <div id="proposals"></div>
             </section>
+
             <section id="answer-card" class="card hidden">
               <div class="card-heading"><span>✓ &nbsp; 运行结果</span></div>
-              <pre id="answer" class="answer"></pre>
+              <div id="answer" class="answer md-body"></div>
             </section>
-            <section id="followup-card" class="card composer hidden">
+
+            <section id="followup-card" class="card composer followup-sticky hidden">
               <div class="card-heading">
-                <span><b class="tiny-icon">↳</b> 继续多轮对话（共享当前工作区与上下文）</span>
+                <span id="followup-heading">↳ 继续多轮对话（共享当前工作区与上下文）</span>
                 <label class="small muted"
                   >当前权限
                   <select id="run-perm-mode">
                     <option value="ask">Ask</option>
                     <option value="auto-edit">Auto-Edit</option>
                     <option value="full-auto">Full-Auto</option>
-                  </select></label
-                >
+                    <option value="plan">Plan · 只读规划（先出方案再执行）</option>
+                  </select>
+                </label>
               </div>
+              <div
+                id="followup-live-badge"
+                class="steering-queue-badge hidden"
+                role="status"
+                aria-live="polite"
+              ></div>
+              <label class="sr-only" for="followup-prompt">后续对话指令</label>
               <textarea
                 id="followup-prompt"
                 rows="2"
-                placeholder="继续输入下一条指令（例如：运行测试并把报错修掉 / 截取当前屏幕查看效果）…"
+                placeholder="继续输入下一条指令（支持 / 技能、@ 文件引用、拖拽附件，⌘/Ctrl+Enter 发送）…"
               ></textarea>
+              <div class="attachment-bar">
+                <input
+                  id="followup-attachment-input"
+                  type="file"
+                  class="sr-only"
+                  multiple
+                  accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md"
+                />
+                <button
+                  type="button"
+                  id="followup-attach-btn"
+                  class="button secondary btn-compact"
+                  title="为下一轮指令附加图片或文件（上限 6 MiB）"
+                >
+                  📎 附加文件
+                </button>
+                <div id="followup-attachments" class="attachment-chips"></div>
+              </div>
               <div class="composer-footer">
-                <span class="muted">沿用当前会话历史、结构化工作记忆与 KV Cache 前缀</span>
-                <button class="button primary-button" id="send-followup">
-                  发送后续指令 <span>↗</span>
+                <span id="followup-hint" class="muted"
+                  >沿用当前会话历史、结构化工作记忆与 KV Cache 前缀</span
+                >
+                <button type="button" class="button primary-button" id="send-followup">
+                  发送后续指令 ↗
                 </button>
               </div>
             </section>
           </div>
-          <aside class="right-rail">
-            <section class="card mini">
-              <div class="eyebrow">队列与工作状态</div>
-              <h3>工程可观测面板</h3>
-              <div id="worker-stat" class="knowledge-stat">调度模式检测中…</div>
-              <div id="wm-box" class="state-box muted">选择任务后显示带来源哈希校验的工作记忆。</div>
-              <details id="repomap-details" class="repomap-details hidden">
-                <summary>查看 AST 代码地图 (RepoMap)</summary>
-                <pre id="repomap-pre"></pre>
-              </details>
-            </section>
-            <section class="card mini">
-              <div class="eyebrow">系统构成</div>
-              <h3>一条完整的工程链路</h3>
-              <ol class="architecture">
-                <li>
-                  <span>01</span>
-                  <div>
-                    <b>模型决策</b><small>Claude API / 离线 Demo</small>
-                  </div>
-                </li>
-                <li>
-                  <span>02</span>
-                  <div>
-                    <b>受控工具</b><small>结构校验 · 路径约束 · 只读研究</small>
-                  </div>
-                </li>
-                <li>
-                  <span>03</span>
-                  <div>
-                    <b>执行与恢复</b><small>SQLite · 审批 · 幂等应用</small>
-                  </div>
-                </li>
-                <li>
-                  <span>04</span>
-                  <div>
-                    <b>验证与评测</b><small>语法检查 · 可选容器测试</small>
-                  </div>
-                </li>
-              </ol>
-            </section>
-            <section class="card mini">
-              <div class="eyebrow">按需加载</div>
-              <h3>知识与技能</h3>
-              <div id="knowledge" class="knowledge-stat">正在读取索引…</div>
-              <div id="skills" class="skills"></div>
-              <p class="hint">
-                检索为 BM25 + 词法向量 + RRF。技能目录先载入，正文按需读取。
-              </p>
-            </section>
-            <section class="note">
-              <span>学习提示</span>
-              <p>
-                先看一次完整轨迹，再阅读
-                <code>runtime.py</code
-                >。区分“模型想做什么”和“系统允许做什么”，是理解 Agent 的起点。
-              </p>
-              <a href="/docs" target="_blank">探索 API 接口 <span>↗</span></a>
-            </section>
-            <section class="card mini">
-              <div class="eyebrow">AGENT MEMORY & DREAMING</div>
-              <h3>分层记忆 · Wiki 图谱 · Dreaming</h3>
-              <div id="memory-budget-stat" class="knowledge-stat">正在读取记忆层级…</div>
-              <div id="dream-stat" class="state-box muted">每次会话完成后默认自动运行 Dreaming 纠错与建图。</div>
-              <div class="dream-controls">
-                <input
-                  id="dream-goal"
-                  placeholder="可选聚焦目标（如：结算模块边界规则）"
-                  maxlength="200"
-                />
-                <button class="button secondary" id="run-dream">
-                  立即运行 Dreaming ↻
-                </button>
-              </div>
-              <details id="memory-index-details" class="repomap-details">
-                <summary>查看 MEMORY.md 顶层注入索引</summary>
-                <pre id="memory-index-pre"></pre>
-              </details>
-              <div id="wiki-pages-list" class="wiki-pages-list"></div>
-              <details id="wiki-page-viewer" class="repomap-details hidden">
-                <summary id="wiki-page-title">查看笔记正文与双向链接</summary>
-                <div id="wiki-page-meta" class="muted"></div>
-                <pre id="wiki-page-body"></pre>
-              </details>
-            </section>
-            <section class="card mini">
-              <div class="eyebrow">显式偏好笔记</div>
-              <h3>快速保存键值偏好</h3>
-              <label class="sr-only" for="memory-key">记忆名称</label
-              ><input
-                id="memory-key"
-                placeholder="名称，如 review_preference"
-                maxlength="80"
-              /><label class="sr-only" for="memory-value">记忆正文</label
-              ><textarea
-                id="memory-value"
-                placeholder="需要后续任务参考的偏好…"
-                rows="2"
-                maxlength="2000"
-              ></textarea
-              ><button class="button secondary" id="save-memory">
-                保存笔记
+
+          <aside id="right-inspector" class="right-rail" aria-label="右侧工程检视面板">
+            <div class="inspector-tabs" role="tablist" aria-label="检视面板分页">
+              <button
+                type="button"
+                id="tab-btn-run"
+                class="inspector-tab active"
+                role="tab"
+                data-tab="run"
+                aria-selected="true"
+                aria-controls="tab-panel-run"
+              >
+                运行态
               </button>
-              <div id="memory-list" class="hint"></div>
-            </section>
+              <button
+                type="button"
+                id="tab-btn-memory"
+                class="inspector-tab"
+                role="tab"
+                data-tab="memory"
+                aria-selected="false"
+                aria-controls="tab-panel-memory"
+              >
+                记忆图谱
+              </button>
+              <button
+                type="button"
+                id="tab-btn-tools"
+                class="inspector-tab"
+                role="tab"
+                data-tab="tools"
+                aria-selected="false"
+                aria-controls="tab-panel-tools"
+              >
+                工具规则
+              </button>
+            </div>
+
+            <!-- Tab 1: Run Observability + Background Processes -->
+            <div
+              id="tab-panel-run"
+              class="inspector-panel"
+              role="tabpanel"
+              aria-labelledby="tab-btn-run"
+              data-tab-panel="run"
+            >
+              <section class="card mini">
+                <div class="eyebrow">队列与工作状态</div>
+                <h3>工程可观测面板</h3>
+                <div id="worker-stat" class="knowledge-stat">调度模式检测中…</div>
+                <div id="context-bar-box" class="state-box context-bar-box">
+                  <div class="context-bar-head-row">
+                    <span class="context-bar-head">长上下文预算与自动压缩</span>
+                    <span id="context-watermark-badge" class="context-watermark-badge"
+                      >自动压缩水位 80% → 55%</span
+                    >
+                  </div>
+                  <div
+                    class="context-meter"
+                    id="context-meter"
+                    role="progressbar"
+                    aria-label="长上下文预算使用率（80% 高水位自动压缩至 55% 低水位）"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    aria-valuenow="0"
+                  >
+                    <div id="context-meter-fill" class="context-meter-fill"></div>
+                    <span
+                      id="context-low-marker"
+                      class="context-meter-marker low"
+                      style="left: 55%"
+                      title="压缩回落低水位 55%（预留连续多轮 KV Cache 命中余量）"
+                    ></span>
+                    <span
+                      id="context-high-marker"
+                      class="context-meter-marker high"
+                      style="left: 80%"
+                      title="自动压缩触发高水位阈值 80%"
+                    ></span>
+                  </div>
+                  <div class="context-meter-legend" aria-hidden="true">
+                    <span>0%</span>
+                    <span id="context-low-tick" class="tick-low">↙ 55% 回落</span>
+                    <span id="context-high-tick" class="tick-high">⚡ 80% 自动阈值</span>
+                  </div>
+                  <div id="context-stat-text" class="context-stat-text muted">
+                    达到自动压缩阈值 80% 时自动折叠早期原子组回落至 55% 并原位注入 COMPACTION_SUMMARY；选择任务后显示实时使用率与 KV 命中率。
+                  </div>
+                  <button
+                    type="button"
+                    class="button secondary context-compact-btn hidden"
+                    id="compact-btn"
+                    title="上下文达到 80% 时会自动触发压缩；空闲时也可按需立即手动整理 (/compact)"
+                  >
+                    立即手动整理
+                  </button>
+                  <details id="compaction-details" class="repomap-details hidden">
+                    <summary>查看 COMPACTION_SUMMARY 压缩摘要</summary>
+                    <pre id="compaction-pre"></pre>
+                  </details>
+                </div>
+                <div id="wm-box" class="state-box wm-scroll-box muted">
+                  选择任务后显示带来源哈希校验的工作记忆。
+                </div>
+                <details id="repomap-details" class="repomap-details hidden">
+                  <summary>查看 AST 代码地图 (RepoMap)</summary>
+                  <pre id="repomap-pre"></pre>
+                </details>
+              </section>
+
+              <section class="card mini">
+                <div class="inspector-card-head">
+                  <div>
+                    <div class="eyebrow">BACKGROUND RUNTIME</div>
+                    <h3>后台 PTY 与子 Agent 进程</h3>
+                  </div>
+                  <button
+                    type="button"
+                    id="refresh-procs-btn"
+                    class="icon-mini-btn"
+                    title="刷新后台进程与异步子 Agent 状态"
+                    aria-label="刷新后台进程状态"
+                  >
+                    ↻
+                  </button>
+                </div>
+                <div id="bg-processes-box" class="state-box bg-processes-box muted">
+                  选择任务后查看活跃的后台 PTY / Shell 进程及异步子 Agent 任务。
+                </div>
+              </section>
+            </div>
+
+            <!-- Tab 2: Memory, Dreaming, Core Docs & KV Preferences -->
+            <div
+              id="tab-panel-memory"
+              class="inspector-panel hidden"
+              role="tabpanel"
+              aria-labelledby="tab-btn-memory"
+              data-tab-panel="memory"
+            >
+              <section class="card mini">
+                <div class="inspector-card-head">
+                  <div>
+                    <div class="eyebrow">AGENT MEMORY &amp; DREAMING</div>
+                    <h3>分层记忆 · Wiki 图谱 · Dreaming</h3>
+                  </div>
+                  <button
+                    type="button"
+                    id="open-wide-memory-modal"
+                    class="button secondary btn-compact"
+                    title="在宽屏弹窗中编辑 CLAUDE.md / MEMORY.md 或查看 Dreaming Diff"
+                  >
+                    ⤢ 宽屏编辑
+                  </button>
+                </div>
+                <div id="memory-budget-stat" class="knowledge-stat">正在读取记忆层级…</div>
+                <div id="dream-stat" class="state-box muted">
+                  每次会话完成后默认自动运行 Dreaming 纠错与建图。
+                </div>
+                <div class="dream-controls">
+                  <label class="sr-only" for="dream-goal">Dreaming 聚焦目标</label>
+                  <input
+                    id="dream-goal"
+                    placeholder="可选聚焦目标（如：结算模块边界规则）"
+                    maxlength="200"
+                  />
+                  <div class="dream-btn-row">
+                    <button
+                      type="button"
+                      class="button secondary btn-compact"
+                      id="preview-dream"
+                      title="零落盘预演即将执行的 Wiki/记忆变更并查看 Diff"
+                    >
+                      预演 Diff
+                    </button>
+                    <button type="button" class="button secondary btn-compact" id="run-dream">
+                      立即运行 ↻
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    class="button danger btn-compact dream-rollback-btn"
+                    id="rollback-dream"
+                    title="将双层记忆恢复到最近一次 Dreaming 执行前的原子快照"
+                  >
+                    ↶ 回滚上次整理
+                  </button>
+                </div>
+                <div id="dream-preview-box" class="dream-preview-box hidden">
+                  <div class="dream-preview-head">
+                    <span id="dream-preview-summary">预演 Diff</span>
+                    <div class="dream-preview-head-actions">
+                      <button
+                        type="button"
+                        id="open-wide-dream-modal"
+                        class="icon-mini-btn"
+                        title="在宽屏弹窗中展开全部 Diff"
+                        aria-label="在宽屏弹窗中查看预演 Diff"
+                      >
+                        ⤢
+                      </button>
+                      <button
+                        type="button"
+                        id="dream-preview-close"
+                        class="icon-mini-btn"
+                        title="关闭预演"
+                        aria-label="关闭预演"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                  <div id="dream-preview-diffs" class="dream-preview-diffs"></div>
+                </div>
+                <details id="core-memory-editor" class="repomap-details">
+                  <summary>查看 / 编辑 CLAUDE.md 与 MEMORY.md（用户级 + 项目级）</summary>
+                  <div class="core-memory-controls">
+                    <select id="core-doc-target" aria-label="选择长期记忆目标文件">
+                      <option value="global:CLAUDE.md">
+                        用户全局级 · global/CLAUDE.md（跨项目长期工程准则）
+                      </option>
+                      <option value="global:MEMORY.md">
+                        用户全局级 · global/MEMORY.md（跨项目长期记忆索引）
+                      </option>
+                      <option value="project:CLAUDE.md">
+                        当前项目级 · project/CLAUDE.md（仓库专属规范）
+                      </option>
+                      <option value="project:MEMORY.md">
+                        当前项目级 · project/MEMORY.md（项目记忆导航索引）
+                      </option>
+                    </select>
+                    <textarea
+                      id="core-doc-content"
+                      rows="6"
+                      placeholder="编写跨会话永久保留的工程规范、代码风格偏好、常用命令或架构约束…"
+                    ></textarea>
+                    <label class="checkbox-label hidden" id="sync-ws-doc-wrap"
+                      ><input type="checkbox" id="sync-ws-doc" /> 同步写入项目根目录同名文件</label
+                    >
+                    <button type="button" class="button secondary" id="save-core-doc">
+                      保存长期记忆文件
+                    </button>
+                  </div>
+                </details>
+                <details id="memory-index-details" class="repomap-details">
+                  <summary>查看 CLAUDE.md / MEMORY.md 顶层注入索引</summary>
+                  <pre id="memory-index-pre"></pre>
+                </details>
+                <div id="wiki-pages-list" class="wiki-pages-list"></div>
+                <details id="wiki-page-viewer" class="repomap-details hidden">
+                  <summary id="wiki-page-title">查看笔记正文与双向链接</summary>
+                  <div id="wiki-page-meta" class="muted"></div>
+                  <div id="wiki-page-body" class="md-body state-box"></div>
+                </details>
+              </section>
+
+              <section class="card mini">
+                <div class="eyebrow">显式偏好笔记</div>
+                <h3>快速保存键值偏好</h3>
+                <label class="sr-only" for="memory-key">记忆名称</label>
+                <input id="memory-key" placeholder="名称，如 review_preference" maxlength="80" />
+                <label class="sr-only" for="memory-value">记忆正文</label>
+                <textarea
+                  id="memory-value"
+                  placeholder="需要后续任务参考的偏好…"
+                  rows="2"
+                  maxlength="2000"
+                ></textarea>
+                <button type="button" class="button secondary" id="save-memory">保存笔记</button>
+                <div id="memory-list" class="hint"></div>
+              </section>
+            </div>
+
+            <!-- Tab 3: Skills, Declarative Rules & Hooks, Audit Logs, Workspace Files -->
+            <div
+              id="tab-panel-tools"
+              class="inspector-panel hidden"
+              role="tabpanel"
+              aria-labelledby="tab-btn-tools"
+              data-tab-panel="tools"
+            >
+              <section class="card mini">
+                <div class="eyebrow">按需加载</div>
+                <h3>知识、多通道技能与延迟 MCP</h3>
+                <div id="knowledge" class="knowledge-stat">正在读取索引…</div>
+                <div id="skills" class="skills"></div>
+                <p class="hint">
+                  点击上方技能标签可快速插入 <code>/skill</code> 指令；同时支持
+                  <code>paths/globs</code> 路径匹配、BM25 + TF-IDF + RRF 多通道路由与
+                  <code>mcp_tool_search</code> 按需发现。
+                </p>
+              </section>
+
+              <section class="card mini" id="gateway-card">
+                <div class="inspector-card-head">
+                  <div>
+                    <div class="eyebrow">MULTI-PROTOCOL MODEL GATEWAYS</div>
+                    <h3>模型网关协议配置 (Gateways)</h3>
+                  </div>
+                  <button
+                    type="button"
+                    id="gateway-refresh-btn"
+                    class="icon-mini-btn"
+                    title="刷新模型网关配置与协议列表"
+                    aria-label="刷新模型网关配置"
+                  >
+                    ↻
+                  </button>
+                </div>
+                <div class="gateway-controls">
+                  <div class="gateway-status-row">
+                    <span id="gateway-status-badge" class="gateway-protocol-pill">
+                      正在读取网关协议…
+                    </span>
+                  </div>
+                  <label class="sr-only" for="gateway-profile-select">选择模型网关 Profile</label>
+                  <div class="gateway-row">
+                    <select id="gateway-profile-select" aria-label="选择模型网关 Profile">
+                      <option value="">正在加载 Profile…</option>
+                    </select>
+                    <button
+                      type="button"
+                      id="gateway-activate-btn"
+                      class="button primary-button btn-compact"
+                      title="立即切换并激活选中的模型网关 Profile"
+                    >
+                      切换生效
+                    </button>
+                  </div>
+                  <details id="gateway-editor-details" class="repomap-details gateway-editor-details">
+                    <summary>编辑 gateways.json（脱敏配置视图）</summary>
+                    <div class="gateway-editor-body">
+                      <label class="sr-only" for="gateway-json-editor">gateways.json 脱敏配置</label>
+                      <textarea
+                        id="gateway-json-editor"
+                        rows="8"
+                        spellcheck="false"
+                        placeholder='{"schema_version": 1, "active_profile": "demo", "profiles": {}}'
+                      ></textarea>
+                      <button type="button" id="gateway-save-btn" class="button secondary">
+                        保存网关配置
+                      </button>
+                      <div id="gateway-hint-text" class="hint">
+                        支持 anthropic_messages / openai_chat / openai_responses /
+                        gemini_generate_content / demo 协议；密钥已自动脱敏为
+                        ***REDACTED***，推荐通过 api_key_env 引用环境变量。
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </section>
+
+              <section class="card mini" id="a2a-card">
+                <div class="inspector-card-head">
+                  <div>
+                    <div class="eyebrow">A2A · AGENT2AGENT PROTOCOL</div>
+                    <h3>A2A 远端智能体协同 (Agent2Agent)</h3>
+                  </div>
+                  <button
+                    type="button"
+                    id="a2a-refresh-btn"
+                    class="icon-mini-btn"
+                    title="刷新 A2A 远端智能体列表与配置"
+                    aria-label="刷新 A2A 配置"
+                  >
+                    ↻
+                  </button>
+                </div>
+                <div class="a2a-controls">
+                  <div class="a2a-self-row">
+                    <a
+                      id="a2a-self-card-link"
+                      class="a2a-self-card-link"
+                      href="/.well-known/agent-card.json"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="在新标签页查看本节点对外发布的 A2A AgentCard"
+                    >
+                      ◈ 本节点 AgentCard (/.well-known/agent-card.json) ↗
+                    </a>
+                  </div>
+                  <label class="sr-only" for="a2a-peer-select">选择远端 A2A 智能体</label>
+                  <div class="gateway-row a2a-row">
+                    <select id="a2a-peer-select" aria-label="选择远端 A2A 智能体">
+                      <option value="">正在加载对端 Agent…</option>
+                    </select>
+                    <button
+                      type="button"
+                      id="a2a-discover-btn"
+                      class="button primary-button btn-compact"
+                      title="拉取选中远端智能体的 AgentCard（/.well-known/agent-card.json）"
+                    >
+                      发现 Card
+                    </button>
+                  </div>
+                  <div id="a2a-status-text" class="state-box a2a-status-box muted">
+                    正在读取 A2A 远端智能体配置…
+                  </div>
+                  <details id="a2a-editor-details" class="repomap-details a2a-editor-details">
+                    <summary>编辑 a2a.json（脱敏配置视图）</summary>
+                    <div class="gateway-editor-body">
+                      <label class="sr-only" for="a2a-json-editor">a2a.json 脱敏配置</label>
+                      <textarea
+                        id="a2a-json-editor"
+                        rows="7"
+                        spellcheck="false"
+                        placeholder='{"schema_version": 1, "peers": {}}'
+                      ></textarea>
+                      <button type="button" id="a2a-save-btn" class="button secondary">
+                        保存 A2A 配置
+                      </button>
+                    </div>
+                  </details>
+                </div>
+              </section>
+
+              <section class="card mini">
+                <div class="eyebrow">SETTINGS.JSON RULES &amp; HOOKS</div>
+                <h3>声明式权限规则与钩子</h3>
+                <div class="rules-form">
+                  <label class="rules-field-label" for="rules-scope-select">规则作用域</label>
+                  <select id="rules-scope-select" aria-label="选择规则作用域">
+                    <option value="global">全局配置 · global/settings.json</option>
+                    <option value="project">项目配置 · .agent-lab/settings.json</option>
+                    <option value="effective">生效合并视图（只读）</option>
+                  </select>
+                  <label class="rules-field-label" for="rules-allow-input"
+                    >Allow 自动放行规则（每行一条）</label
+                  >
+                  <textarea
+                    id="rules-allow-input"
+                    rows="2"
+                    placeholder="例如：Read(**)&#10;Bash(pytest*)"
+                  ></textarea>
+                  <label class="rules-field-label" for="rules-ask-input"
+                    >Ask 强制人工确认（每行一条）</label
+                  >
+                  <textarea
+                    id="rules-ask-input"
+                    rows="2"
+                    placeholder="例如：Edit(src/**)&#10;Bash(git push*)"
+                  ></textarea>
+                  <label class="rules-field-label" for="rules-deny-input"
+                    >Deny 严格拒绝规则（每行一条）</label
+                  >
+                  <textarea
+                    id="rules-deny-input"
+                    rows="2"
+                    placeholder="例如：Bash(rm -rf *)&#10;Read(.env*)"
+                  ></textarea>
+                  <button type="button" id="rules-save-btn" class="button secondary">
+                    保存声明式规则
+                  </button>
+                  <div id="rules-status-text" class="hint">
+                    声明式规则优先级：Deny &gt; Ask &gt; Allow。
+                  </div>
+                  <div id="rules-hooks-summary" class="state-box muted hidden"></div>
+                </div>
+              </section>
+
+              <section class="card mini">
+                <div class="inspector-card-head">
+                  <div>
+                    <div class="eyebrow">SECURITY AUDIT</div>
+                    <h3>安全审计日志</h3>
+                  </div>
+                  <button
+                    type="button"
+                    id="refresh-audit-btn"
+                    class="icon-mini-btn"
+                    title="刷新安全审计日志"
+                    aria-label="刷新安全审计日志"
+                  >
+                    ↻
+                  </button>
+                </div>
+                <div id="audit-logs-list" class="audit-logs-list">
+                  <div class="muted">点击刷新按钮加载近期持久化安全审计记录。</div>
+                </div>
+              </section>
+
+              <section class="card mini">
+                <div class="eyebrow">WORKSPACE EXPLORER</div>
+                <h3>工作区文件浏览</h3>
+                <label class="sr-only" for="ws-files-filter">筛选工作区文件</label>
+                <input
+                  id="ws-files-filter"
+                  type="search"
+                  placeholder="筛选路径（点击文件插入 @path）…"
+                  autocomplete="off"
+                />
+                <div id="ws-files-list" class="ws-files-list">
+                  <div class="muted">选择会话或本地目录后显示工作区文件列表。</div>
+                </div>
+              </section>
+            </div>
           </aside>
         </div>
         <footer>
@@ -277,7 +1067,292 @@
         </footer>
       </div>
     </main>
+
+    <!-- 悬浮回到底部按钮（智能自动滚动） -->
+    <button
+      type="button"
+      id="jump-bottom-btn"
+      class="jump-bottom-btn hidden"
+      title="滚动到最新对话与输出"
+    >
+      ↓ 回到底部 / 有新输出
+    </button>
+
+    <!-- 行内 / 技能与 @ 文件自动补全浮层 -->
+    <div
+      id="prompt-autocomplete"
+      class="prompt-autocomplete hidden"
+      role="listbox"
+      aria-label="指令与工作区文件补全"
+    ></div>
+
+    <!-- 认证弹窗（HttpOnly Cookie 会话，替代不安全的 window.prompt） -->
+    <div
+      id="auth-modal"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="auth-modal-title"
+    >
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3 id="auth-modal-title">⚿ 身份认证与安全会话</h3>
+          <button type="button" id="auth-close-btn" class="icon-mini-btn" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <div id="auth-status-text" class="state-box muted">正在检测当前会话认证状态…</div>
+        <label class="modal-label" for="auth-token-input"
+          >API Token（通过 HttpOnly Cookie 建立安全会话）</label
+        >
+        <div class="modal-password-row">
+          <input
+            id="auth-token-input"
+            type="password"
+            autocomplete="current-password"
+            placeholder="输入 AGENT_LAB_TOKEN 或租户令牌"
+          />
+          <button
+            type="button"
+            id="auth-toggle-vis"
+            class="button secondary btn-compact"
+            title="显示或隐藏令牌"
+          >
+            显示
+          </button>
+        </div>
+        <p class="hint">
+          登录成功后由服务端签发 <code>HttpOnly + SameSite=Strict</code> 会话 Cookie，浏览器
+          EventSource 流式推送与截图加载自动鉴权，令牌不落盘。
+        </p>
+        <div class="modal-actions">
+          <button type="button" id="auth-logout-btn" class="button danger">注销会话</button>
+          <div class="modal-actions-right">
+            <button type="button" id="auth-cancel-btn" class="button secondary">取消</button>
+            <button type="button" id="auth-login-btn" class="button primary-button">
+              登录会话 ↗
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 重命名会话弹窗 -->
+    <div
+      id="rename-modal"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="rename-modal-title"
+    >
+      <div class="modal-card modal-card-sm">
+        <div class="modal-head">
+          <h3 id="rename-modal-title">✎ 重命名会话</h3>
+          <button type="button" id="rename-close-btn" class="icon-mini-btn" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <label class="modal-label" for="rename-title-input">会话标题</label>
+        <input
+          id="rename-title-input"
+          type="text"
+          maxlength="200"
+          placeholder="输入简洁清晰的会话标题"
+        />
+        <div class="modal-actions">
+          <span></span>
+          <div class="modal-actions-right">
+            <button type="button" id="rename-cancel-btn" class="button secondary">取消</button>
+            <button type="button" id="rename-save-btn" class="button primary-button">保存标题</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 工作区目录选择器弹窗 -->
+    <div
+      id="browse-modal"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="browse-modal-title"
+    >
+      <div class="modal-card modal-card-md">
+        <div class="modal-head">
+          <h3 id="browse-modal-title">▤ 选择本地工作区目录</h3>
+          <button type="button" id="browse-close-btn" class="icon-mini-btn" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <div class="browse-path-bar">
+          <button
+            type="button"
+            id="browse-up-btn"
+            class="button secondary btn-compact"
+            title="返回上级目录"
+          >
+            ↑ 上级
+          </button>
+          <div id="browse-current-path" class="browse-current-path" title="当前路径">正在加载…</div>
+        </div>
+        <div class="browse-section-label">最近使用的本地工作区</div>
+        <div id="browse-recent-list" class="browse-recent-list"></div>
+        <div class="browse-section-label">子目录列表</div>
+        <div id="browse-dir-list" class="browse-dir-list"></div>
+        <div class="modal-actions">
+          <span class="muted">受控目录浏览器仅展示白名单内非敏感目录</span>
+          <div class="modal-actions-right">
+            <button type="button" id="browse-cancel-btn" class="button secondary">取消</button>
+            <button type="button" id="browse-select-btn" class="button primary-button">
+              选择此目录
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ⌘K 命令面板弹窗 -->
+    <div
+      id="cmd-modal"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cmd-modal-title"
+    >
+      <div class="modal-card modal-card-cmd">
+        <div class="modal-head cmd-modal-head">
+          <h3 id="cmd-modal-title" class="sr-only">命令面板</h3>
+          <label class="sr-only" for="cmd-search-input">搜索命令或会话</label>
+          <input
+            id="cmd-search-input"
+            type="text"
+            autocomplete="off"
+            placeholder="输入命令、切换会话、主题或面板操作（↑↓ 选择，Enter 执行，Esc 关闭）…"
+          />
+          <button type="button" id="cmd-close-btn" class="icon-mini-btn" aria-label="关闭命令面板">
+            ✕
+          </button>
+        </div>
+        <div id="cmd-results-list" class="cmd-results-list" role="listbox"></div>
+      </div>
+    </div>
+
+    <!-- 危险操作确认弹窗（Rewind / Dreaming Rollback） -->
+    <div
+      id="confirm-modal"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-modal-title"
+    >
+      <div class="modal-card modal-card-sm">
+        <div class="modal-head">
+          <h3 id="confirm-modal-title">请确认高风险操作</h3>
+          <button type="button" id="confirm-close-btn" class="icon-mini-btn" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <div id="confirm-modal-body" class="confirm-modal-body"></div>
+        <div class="modal-actions">
+          <span></span>
+          <div class="modal-actions-right">
+            <button type="button" id="confirm-cancel-btn" class="button secondary">取消</button>
+            <button type="button" id="confirm-ok-btn" class="button danger">确认执行</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 宽屏记忆编辑 / Diff 检视弹窗 -->
+    <div
+      id="wide-modal"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="wide-modal-title"
+    >
+      <div class="modal-card modal-card-wide">
+        <div class="modal-head">
+          <h3 id="wide-modal-title">宽屏视图</h3>
+          <button type="button" id="wide-modal-close" class="icon-mini-btn" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <div id="wide-modal-body" class="wide-modal-body"></div>
+      </div>
+    </div>
+
+    <!-- 帮助指南弹窗（系统构成 + 学习提示 + 快捷键） -->
+    <div
+      id="help-modal"
+      class="modal-overlay hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="help-modal-title"
+    >
+      <div class="modal-card modal-card-md">
+        <div class="modal-head">
+          <h3 id="help-modal-title">? 系统构成与操作指南</h3>
+          <button type="button" id="help-close-btn" class="icon-mini-btn" aria-label="关闭">
+            ✕
+          </button>
+        </div>
+        <div class="help-modal-body">
+          <div class="help-section">
+            <div class="eyebrow">系统构成</div>
+            <h4>一条完整的工程链路</h4>
+            <ol class="architecture">
+              <li>
+                <span>01</span>
+                <div><b>模型决策</b><small>Claude API / 离线 Demo · SSE 实时流式推送</small></div>
+              </li>
+              <li>
+                <span>02</span>
+                <div><b>受控工具</b><small>结构校验 · 路径约束 · 只读研究 · 延迟 MCP</small></div>
+              </li>
+              <li>
+                <span>03</span>
+                <div><b>执行与恢复</b><small>SQLite · 审批 · 幂等应用 · Checkpoints 回退</small></div>
+              </li>
+              <li>
+                <span>04</span>
+                <div><b>验证与评测</b><small>语法检查 · 可选容器测试 · Dreaming 记忆整理</small></div>
+              </li>
+            </ol>
+          </div>
+          <div class="help-section help-shortcuts">
+            <div class="eyebrow">快捷操作</div>
+            <h4>键盘与输入技巧</h4>
+            <ul class="shortcut-list">
+              <li><span>打开全局命令面板</span><kbd class="kbd-chip">⌘K / Ctrl+K</kbd></li>
+              <li><span>发送新建任务或后续指令</span><kbd class="kbd-chip">⌘Enter / Ctrl+Enter</kbd></li>
+              <li><span>行内点名调用技能</span><code>/skill-name</code></li>
+              <li><span>行内引用工作区文件内容</span><code>@path/to/file</code></li>
+              <li><span>拖拽文件至输入框直接附加</span><code>PNG / PDF / MD / TXT</code></li>
+            </ul>
+          </div>
+          <div class="note help-note">
+            <span>学习提示</span>
+            <p>
+              先看一次完整轨迹，再阅读 <code>runtime.py</code>。区分“模型想做什么”和“系统允许做什么”，是理解
+              Agent 的起点。
+            </p>
+            <a href="/docs" target="_blank" rel="noopener noreferrer">探索 API 接口 <span>↗</span></a>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <span></span>
+          <div class="modal-actions-right">
+            <button type="button" id="help-ok-btn" class="button primary-button">我知道了</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 堆叠式通知容器 + 兼容旧版 #toast -->
+    <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
     <div id="toast" role="alert" class="toast hidden"></div>
-    <script src="/static/app.js"></script>
+
+    <script src="/static/app.js?v=11"></script>
   </body>
 </html>

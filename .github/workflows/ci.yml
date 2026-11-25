@@ -18,6 +18,7 @@ jobs:
       - run: uv run --no-sync ruff check src tests scripts
       - run: uv run --no-sync pytest -q
       - run: uv run --no-sync agent-lab eval --report reports/eval.json
+      - run: uv run --no-sync agent-lab eval --suite subsystems --report reports/eval-subsystems.json
       - run: uv run --no-sync agent-lab kv-benchmark --report reports/kv-benchmark.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -25,7 +26,82 @@ jobs:
           name: eval-${{ matrix.python-version }}
           path: |
             reports/eval.json
+            reports/eval-subsystems.json
             reports/kv-benchmark.json
+
+  frontend-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check JS syntax
+        run: |
+          node --check web/app.js
+          for f in web/*.js; do
+            node --check "$f"
+          done
+      - name: Assert zero unsafe HTML DOM sinks across web/*.js
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const dir = "web";
+            const files = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).sort();
+            const sinkPattern = /\.(?:innerHTML|outerHTML|insertAdjacentHTML)\b|\bdocument\s*\.\s*write(?:ln)?\s*\(/g;
+            function stripComments(src) {
+              return src
+                .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+                .replace(/(^|[^:\\])\/\/[^\n]*/g, "$1");
+            }
+            const violations = [];
+            for (const file of files) {
+              const stripped = stripComments(fs.readFileSync(path.join(dir, file), "utf8"));
+              stripped.split("\n").forEach((line, idx) => {
+                const matches = line.match(sinkPattern);
+                if (matches) {
+                  violations.push(`${file}:${idx + 1}: ${matches.join(", ")}`);
+                }
+              });
+            }
+            if (violations.length > 0) {
+              console.error("Forbidden DOM HTML sink usage detected:\n" + violations.join("\n"));
+              process.exit(1);
+            }
+            console.log(`Frontend DOM safety check passed (${files.length} files): ${files.join(", ")}`);
+          '
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agent_lab
+          POSTGRES_PASSWORD: agent_lab_test_password
+          POSTGRES_DB: agent_lab_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent_lab -d agent_lab_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - run: uv sync --extra dev --extra postgres
+      - name: Run PostgreSQL storage integration tests
+        env:
+          AGENT_LAB_TEST_POSTGRES_DSN: postgresql://agent_lab:agent_lab_test_password@127.0.0.1:5432/agent_lab_test
+        run: |
+          uv run --no-sync pytest -q -k "postgres or pg"
+          uv run --no-sync python -c "import os; from agent_lab.storage import Storage; s = Storage.from_dsn(os.environ['AGENT_LAB_TEST_POSTGRES_DSN']); r = s.create_run('ci-pg-smoke'); assert s.get_run(r['id'])['id'] == r['id']; assert len(s.applied_migrations()) >= 6; s.close()"
 
   sandbox-smoke:
     runs-on: ubuntu-latest
