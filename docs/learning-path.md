@@ -91,3 +91,12 @@ uv run --no-sync ruff check src tests
 完成基础路线后，阅读[长上下文、Skill 与工具状态专项说明](context-skills-state.md)，运行其中两个离线实验，再对照 `tests/test_runtime_optimization_review.py` 与 `tests/test_recovery_integration.py` 解释崩溃窗口。接着准备[进阶题45—80](interview-supplement.md)，优先回答51、53、54、74、75。
 
 阅读[沙盒专题](sandbox-mechanisms.md)，沿 `ToolRegistry.sandbox_test → SandboxRunner.run` 分析：只读副本为什么比直接挂载原仓库更可控，为什么日志也要限制，为什么超时必须清理容器，退出码0为什么不足以证明四个测试执行完成。
+
+## 进阶模块研读：本地电脑操控、外部 MCP 与全生命周期 Dreaming 记忆
+
+完成上述 14 天基础闭环后，按以下顺序精读带教材级中文注释的新增核心模块（完整架构图与高频面试问答见[《本地操控、Computer Use、外部 MCP 与分层 Dreaming 记忆架构详解》](computer-use-and-memory-architecture.md)）：
+
+1. **权限治理与宿主工具平面**：阅读 [`permissions.py`](../src/agent_lab/permissions.py) → [`host_tools.py`](../src/agent_lab/host_tools.py)，配跑 `pytest tests/test_host_tools_and_permissions.py -q`，理解 `ask / auto-edit / full-auto` 三级策略、纯词法优先于 `resolve()` 的软硬链接防御、64KB 管道后台排水与进程组清场。
+2. **原生桌面操控与多模态缓存对齐**：阅读 [`computer.py`](../src/agent_lab/computer.py) → [`providers.py`](../src/agent_lab/providers.py)，配跑 `pytest tests/test_computer_use.py -q`，理解 macOS CoreGraphics 64 位指针防截断、ARM64 非变参 ABI、Retina 逻辑点缩放以及尾部瞬态图像块如何保住 100% 历史 KV Cache。
+3. **动态子 Agent 与外部 MCP Client**：阅读 [`mcp_client.py`](../src/agent_lab/mcp_client.py) → [`runtime.py`](../src/agent_lab/runtime.py)（`_dispatch_call` 与 `_invoke_subagent_run`）→ [`repl.py`](../src/agent_lab/repl.py)，配跑 `pytest tests/test_subagent_and_mcp_client.py tests/test_multiturn_repl_and_web.py -q`。
+4. **海马体—新皮层双系统跨会话记忆**：阅读 [`memory.py`](../src/agent_lab/memory.py) → [`retrieval.py`](../src/agent_lab/retrieval.py)，配跑 `pytest tests/test_agent_memory_and_dreaming.py -q`，理解 `<=200` 行 `MEMORY.md` 头部预载、互链 Wiki + Transcript 混合 RRF 检索，以及无锁 LLM 合成 + 短 `flock` 提交的四阶段离线 Dreaming。

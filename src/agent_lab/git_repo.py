@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import contextlib
+import difflib
 import fcntl
 import gzip
 import io
@@ -28,6 +29,8 @@ from typing import Any
 import uuid
 import zlib
 
+from .host_tools import is_host_secret_segment
+
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _GIT_ENV = {
@@ -40,13 +43,41 @@ _GIT_ENV = {
 }
 _DEFAULT_ALLOWED_EXTENSIONS: tuple[str, ...] = (
     ".py",
-    ".toml",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".rb",
+    ".php",
+    ".swift",
+    ".md",
+    ".txt",
     ".json",
     ".yaml",
     ".yml",
+    ".toml",
     ".cfg",
     ".ini",
+    ".css",
+    ".scss",
+    ".html",
+    ".sql",
+    ".sh",
 )
+_FORBIDDEN_HIDDEN_DIRS = frozenset({".git", ".ssh", ".gnupg", ".aws", ".kube", ".agent-lab"})
+_MAX_UNTRACKED_DIFF_FILES = 32
+_MAX_UNTRACKED_FILE_BYTES = 64 * 1024
+_BINARY_SNIFF_BYTES = 8192
 _SENSITIVE_STEMS = frozenset(
     {"credentials", "secrets", "secret", "private_key", "tokens", "api_key", "apikey"}
 )
@@ -267,8 +298,105 @@ def is_git_worktree(workspace: Path) -> bool:
     return not marker.is_symlink() and (marker.is_file() or marker.is_dir())
 
 
+def _is_binary_bytes(raw: bytes) -> bool:
+    return b"\x00" in raw[:_BINARY_SNIFF_BYTES]
+
+
+def _build_untracked_synthetic_diffs(
+    root: Path,
+    untracked_paths: list[str],
+    budget_chars: int,
+) -> tuple[str, bool]:
+    """为未追踪新建文件生成有界合成 unified diff（对比 /dev/null），过滤敏感文件、符号链接与二进制文件。"""
+    if not untracked_paths or budget_chars <= 0:
+        return "", bool(untracked_paths)
+    chunks: list[str] = []
+    used = 0
+    truncated = len(untracked_paths) > _MAX_UNTRACKED_DIFF_FILES
+    for raw_rel in untracked_paths[:_MAX_UNTRACKED_DIFF_FILES]:
+        if used >= budget_chars:
+            truncated = True
+            break
+        try:
+            norm = _normalize_repo_relpath(raw_rel)
+        except GitRepoError:
+            continue
+        pure = PurePosixPath(norm)
+        if any(
+            part in _FORBIDDEN_HIDDEN_DIRS or is_host_secret_segment(part)
+            for part in pure.parts
+        ) or _is_secret_relpath(norm):
+            continue
+        cursor = root
+        is_sym = False
+        for part in pure.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                is_sym = True
+                break
+        if is_sym:
+            continue
+        try:
+            st = os.lstat(cursor)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            continue
+
+        header = f"diff --git a/{norm} b/{norm}\nnew file mode 100644\n"
+        if st.st_size > _MAX_UNTRACKED_FILE_BYTES:
+            entry_text = (
+                f"{header}--- /dev/null\n+++ b/{norm}\n"
+                f"@@ -0,0 +0,0 @@\n"
+                f"# [omitted: untracked file exceeds {_MAX_UNTRACKED_FILE_BYTES} bytes ({st.st_size} bytes)]\n"
+            )
+        else:
+            try:
+                with open(cursor, "rb") as fp:
+                    raw_bytes = fp.read(_MAX_UNTRACKED_FILE_BYTES + 1)
+            except OSError:
+                continue
+            if len(raw_bytes) > _MAX_UNTRACKED_FILE_BYTES:
+                entry_text = (
+                    f"{header}--- /dev/null\n+++ b/{norm}\n"
+                    f"@@ -0,0 +0,0 @@\n"
+                    f"# [omitted: untracked file exceeds {_MAX_UNTRACKED_FILE_BYTES} bytes]\n"
+                )
+            elif _is_binary_bytes(raw_bytes):
+                entry_text = f"{header}Binary files /dev/null and b/{norm} differ\n"
+            else:
+                try:
+                    text = raw_bytes.decode("utf-8")
+                except UnicodeError:
+                    entry_text = f"{header}Binary files /dev/null and b/{norm} differ\n"
+                else:
+                    body = "".join(
+                        difflib.unified_diff(
+                            [],
+                            text.splitlines(keepends=True),
+                            fromfile="/dev/null",
+                            tofile=f"b/{norm}",
+                        )
+                    )
+                    if not body:
+                        body = f"--- /dev/null\n+++ b/{norm}\n"
+                    entry_text = header + body
+                    if not entry_text.endswith("\n"):
+                        entry_text += "\n"
+
+        remaining = budget_chars - used
+        if len(entry_text) > remaining:
+            chunks.append(entry_text[:remaining])
+            used = budget_chars
+            truncated = True
+            break
+        chunks.append(entry_text)
+        used += len(entry_text)
+    return "".join(chunks), truncated
+
+
 def worktree_status(workspace: Path, base_commit: str | None = None, max_diff_chars: int = 8000) -> dict[str, Any]:
-    """只读查看当前工作区的 Git 基线、修改文件列表和有界 unified diff。"""
+    """只读查看当前工作区的 Git 基线、修改文件列表和有界 unified diff（含未追踪新建文件合成 diff）。"""
     root = _validate_local_dir(workspace, "工作区")
     if not is_git_worktree(root):
         return {"ok": True, "is_git": False, "note": "当前工作区是静态目录副本，未启用 Git worktree。"}
@@ -279,8 +407,27 @@ def worktree_status(workspace: Path, base_commit: str | None = None, max_diff_ch
     for line in porcelain.splitlines():
         if len(line) >= 4:
             changed.append({"status": line[:2].strip() or "M", "path": line[3:]})
+    porcelain_all_z = _git(["status", "--porcelain", "-z", "--untracked-files=all"], cwd=root)
+    _, untracked_all = _parse_porcelain_z(porcelain_all_z)
+
     raw_diff = _git(["diff", "--no-ext-diff", anchor, "--"], cwd=root)
     truncated = len(raw_diff) > max_diff_chars
+    combined_diff = raw_diff[:max_diff_chars]
+
+    if untracked_all:
+        remaining = max_diff_chars - len(combined_diff)
+        sep = "\n" if (combined_diff and not combined_diff.endswith("\n")) else ""
+        if remaining > len(sep):
+            untracked_diff, untracked_truncated = _build_untracked_synthetic_diffs(
+                root, sorted(untracked_all), remaining - len(sep)
+            )
+            if untracked_diff:
+                combined_diff = combined_diff + sep + untracked_diff
+            if untracked_truncated:
+                truncated = True
+        else:
+            truncated = True
+
     return {
         "ok": True,
         "is_git": True,
@@ -289,7 +436,7 @@ def worktree_status(workspace: Path, base_commit: str | None = None, max_diff_ch
         "baseline_matches_head": head == anchor,
         "dirty": bool(changed),
         "changed_files": changed[:64],
-        "diff": raw_diff[:max_diff_chars],
+        "diff": combined_diff[:max_diff_chars],
         "diff_truncated": truncated,
     }
 
@@ -344,7 +491,9 @@ def _is_secret_relpath(rel_path: str) -> bool:
     for part in pure.parts:
         lower = part.casefold()
         if (
-            lower in _SECRET_FILENAMES
+            part in _FORBIDDEN_HIDDEN_DIRS
+            or is_host_secret_segment(part)
+            or lower in _SECRET_FILENAMES
             or Path(part).stem.casefold() in _SENSITIVE_STEMS
             or (not lower.startswith(".") and lower.split(".", 1)[0] in _SENSITIVE_STEMS)
             or lower.startswith((".env", "id_rsa", "id_ed25519"))
@@ -385,15 +534,23 @@ def _parse_porcelain_z(raw_porcelain: str) -> tuple[set[str], set[str]]:
     return tracked, untracked
 
 
-def _validate_stageable_path(root: Path, rel_path: str, allowed_exts: set[str]) -> None:
+def _validate_stageable_path(
+    root: Path,
+    rel_path: str,
+    allowed_exts: set[str],
+    *,
+    approved_set: set[str] | None = None,
+) -> None:
     norm = _normalize_repo_relpath(rel_path)
     if _is_test_path(norm):
         raise GitRepoError("test_oracle_modified", f"检测到受保护测试路径存在改动，拒绝提交: {norm}")
     if _is_secret_relpath(norm):
         raise GitRepoError("edit_forbidden", f"检测到敏感凭证或密钥文件，拒绝提交: {norm}")
     pure = PurePosixPath(norm)
-    if any(part.startswith(".") for part in pure.parts):
+    if any(part.startswith(".") or part in _FORBIDDEN_HIDDEN_DIRS for part in pure.parts):
         raise GitRepoError("edit_forbidden", f"拒绝提交隐藏路径文件: {norm}")
+    if len(pure.parts) == 1 and pure.name.casefold() == "readme.md" and norm not in (approved_set or set()):
+        raise GitRepoError("edit_forbidden", f"修改根目录文档需显式列入 approved_paths: {norm}")
     suffix = pure.suffix.casefold()
     if not suffix or suffix not in allowed_exts:
         raise GitRepoError("edit_forbidden", f"不允许提交受限文件类型: {norm}")
@@ -402,6 +559,17 @@ def _validate_stageable_path(root: Path, rel_path: str, allowed_exts: set[str]) 
         cursor = cursor / part
         if cursor.is_symlink():
             raise GitRepoError("edit_forbidden", f"拒绝提交符号链接路径: {norm}")
+    if cursor.exists() and cursor.is_file():
+        st = cursor.stat()
+        if st.st_nlink != 1:
+            raise GitRepoError("edit_forbidden", f"拒绝提交多重硬链接文件: {norm}")
+        try:
+            with open(cursor, "rb") as fp:
+                head = fp.read(_BINARY_SNIFF_BYTES)
+        except OSError as exc:
+            raise GitRepoError("edit_forbidden", f"无法校验待提交文件: {norm}") from exc
+        if _is_binary_bytes(head):
+            raise GitRepoError("edit_forbidden", f"拒绝提交二进制文件: {norm}")
 
 
 def commit_verified_worktree(
@@ -436,7 +604,7 @@ def commit_verified_worktree(
     approved_set: set[str] = set()
     for raw_ap in approved_paths or []:
         norm_ap = _normalize_repo_relpath(raw_ap)
-        _validate_stageable_path(root, norm_ap, allowed_exts)
+        _validate_stageable_path(root, norm_ap, allowed_exts, approved_set={norm_ap})
         approved_set.add(norm_ap)
 
     head = resolve_commit(root, "HEAD")
@@ -495,7 +663,7 @@ def commit_verified_worktree(
         }
 
     for rel_path in files_to_stage:
-        _validate_stageable_path(root, rel_path, allowed_exts)
+        _validate_stageable_path(root, rel_path, allowed_exts, approved_set=approved_set)
 
     _git(["add", "--", *files_to_stage], cwd=root)
     staged_now = [

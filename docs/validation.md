@@ -1,6 +1,6 @@
 # 验证记录
 
-日期：2026-11-17。此记录区分工程回归、模型能力与代码执行环境；15 项生产级高可用加固的完整设计与验证映射见 [production-ha-hardening.md](production-ha-hardening.md)。
+日期：2026-11-23。此记录区分工程回归、模型能力与代码执行环境；15 项生产级高可用加固的完整设计与验证映射见 [production-ha-hardening.md](production-ha-hardening.md)，本地直连操控、桌面级 Computer Use、MCP Client 与分层 Dreaming 记忆的架构说明见 [computer-use-and-memory-architecture.md](computer-use-and-memory-architecture.md)。
 
 ## 本机已完成
 

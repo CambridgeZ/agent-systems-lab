@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "peers": {
+    "local-reviewer": {
+      "name": "local-reviewer",
+      "url": "http://127.0.0.1:8788",
+      "card_url": null,
+      "api_key_env": "A2A_LOCAL_REVIEWER_TOKEN",
+      "headers": {},
+      "timeout_seconds": 60.0,
+      "allow_private_network": true,
+      "enabled": true,
+      "description": "Local peer A2A agent instance for parallel review or delegated execution"
+    },
+    "remote-researcher": {
+      "name": "remote-researcher",
+      "url": "https://agent.example.com",
+      "card_url": null,
+      "api_key_env": "A2A_REMOTE_RESEARCHER_TOKEN",
+      "headers": {},
+      "timeout_seconds": 90.0,
+      "allow_private_network": false,
+      "enabled": false,
+      "description": "Example remote HTTPS A2A specialist agent (set enabled=true and token env to activate)"
+    }
+  }
+}

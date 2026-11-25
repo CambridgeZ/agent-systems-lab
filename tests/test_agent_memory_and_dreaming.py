@@ -351,11 +351,15 @@ async def test_repl_dream_commands_and_web_memory_console_multitenant_isolation(
             if r_det["status"] == "completed":
                 break
             time.sleep(0.05)
-        time.sleep(0.15)
-        ov_after = client.get(
-            f"/api/memory/overview?run_id={rid}",
-            headers={"Authorization": "Bearer tok-a"},
-        ).json()
+        ov_after: dict = {}
+        for _ in range(60):
+            ov_after = client.get(
+                f"/api/memory/overview?run_id={rid}",
+                headers={"Authorization": "Bearer tok-a"},
+            ).json()
+            if any(d["trigger"] == "auto_post_session" for d in ov_after.get("recent_dreams", [])):
+                break
+            time.sleep(0.05)
         assert any(d["trigger"] == "auto_post_session" for d in ov_after["recent_dreams"])
 
 

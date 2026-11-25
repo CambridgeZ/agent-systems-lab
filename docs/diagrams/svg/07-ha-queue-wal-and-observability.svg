@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="22 -18 3262 1627" width="3262" height="1627" role="img" aria-label="07 · 生产级高可用队列租约、Epoch Fencing、多文件 WAL 恢复与多租户安全架构">
+  <title>07 · 生产级高可用队列租约、Epoch Fencing、多文件 WAL 恢复与多租户安全架构</title>
+  <defs>
+    <marker id="mk-end-arrow-0ca678" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#0ca678" stroke="#0ca678" stroke-width="0.6" stroke-linejoin="round" /></marker>
+    <marker id="mk-end-arrow-1971c2" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#1971c2" stroke="#1971c2" stroke-width="0.6" stroke-linejoin="round" /></marker>
+    <marker id="mk-end-arrow-2f9e44" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#2f9e44" stroke="#2f9e44" stroke-width="0.6" stroke-linejoin="round" /></marker>
+    <marker id="mk-end-arrow-3b5bdb" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#3b5bdb" stroke="#3b5bdb" stroke-width="0.6" stroke-linejoin="round" /></marker>
+    <marker id="mk-end-arrow-495057" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#495057" stroke="#495057" stroke-width="0.6" stroke-linejoin="round" /></marker>
+    <marker id="mk-end-arrow-7048e8" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#7048e8" stroke="#7048e8" stroke-width="0.6" stroke-linejoin="round" /></marker>
+    <marker id="mk-end-arrow-c92a2a" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#c92a2a" stroke="#c92a2a" stroke-width="0.6" stroke-linejoin="round" /></marker>
+    <marker id="mk-end-arrow-e03131" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#e03131" stroke="#e03131" stroke-width="0.6" stroke-linejoin="round" /></marker>
+    <marker id="mk-end-arrow-e67700" viewBox="0 0 12 10" refX="10.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M 1.5 1.2 L 10.8 5 L 1.5 8.8 L 3.4 5 Z" fill="#e67700" stroke="#e67700" stroke-width="0.6" stroke-linejoin="round" /></marker>
+  </defs>
+  <rect x="22" y="-18" width="3262" height="1627" rx="12" ry="12" fill="#ffffff" />
+  <text x="60" y="46.46" fill="#1864ab" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="28" text-anchor="start" font-weight="700">07 · 生产级高可用队列租约、Epoch Fencing、多文件 WAL 恢复与多租户安全架构</text>
+  <text x="60" y="77.55" fill="#495057" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="15" text-anchor="start">串联 lease.py · storage.py · tools.py · api.py · observability.py：Kleppmann 世代令牌脑裂拦截、崩溃前滚补丁日志、零信任多租户隔离与 W3C 全链路可观测闭环</text>
+  <rect x="60" y="108" width="3187" height="432" rx="14" ry="14" fill="#f1f8ff" stroke="#74c0fc" stroke-width="2" stroke-dasharray="8 6" />
+  <text x="76" y="133.12" fill="#1864ab" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="16" text-anchor="start" font-weight="600">Zone 1 · 持久队列、租约心跳与 Kleppmann 单调递增 Epoch Fencing 脑裂防护 (storage.py + lease.py)</text>
+  <rect x="60" y="604" width="3187" height="432" rx="14" ry="14" fill="#fffdf0" stroke="#ffd43b" stroke-width="2" stroke-dasharray="8 6" />
+  <text x="76" y="629.12" fill="#e67700" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="16" text-anchor="start" font-weight="600">Zone 2 · 崩溃安全多文件 WAL 前滚恢复与动作提案防重放状态机 (ToolRegistry.apply_proposal · tools.py + storage.py)</text>
+  <rect x="60" y="1100" width="1515" height="432" rx="14" ry="14" fill="#faf8ff" stroke="#b197fc" stroke-width="2" stroke-dasharray="8 6" />
+  <text x="76" y="1125.12" fill="#5f3dc4" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="16" text-anchor="start" font-weight="600">Zone 3 · 多租户 RBAC、异人复核 (4-Eyes) 与直连目录 GC 安全隔离 (api.py + storage.py)</text>
+  <rect x="1719" y="1100" width="1528" height="432" rx="14" ry="14" fill="#f4fce3" stroke="#8ce99a" stroke-width="2" stroke-dasharray="8 6" />
+  <text x="1735" y="1125.12" fill="#2b8a3e" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="16" text-anchor="start" font-weight="600">Zone 4 · 端到端分布式追踪、递归凭据脱敏与 Prometheus 指标导出 (observability.py + api.py)</text>
+  <rect x="98" y="166" width="508.6" height="132" rx="14" ry="14" fill="#e7f5ff" stroke="#1971c2" stroke-width="2" />
+  <text x="352.3" y="201.48" fill="#1864ab" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="352.3" dy="0" font-weight="600">原子审批与持久队列入队</tspan>
+    <tspan x="352.3" dy="17.5">approve_and_enqueue / enqueue_run</tspan>
+    <tspan x="352.3" dy="17.5">(storage.py · run_leases 表)</tspan>
+    <tspan x="352.3" dy="17.5">单事务 BEGIN IMMEDIATE 更新 proposals</tspan>
+    <tspan x="352.3" dy="17.5">置 queue_state='queued', takeover_count=0</tspan>
+  </text>
+  <rect x="738.6" y="166" width="493.6" height="132" rx="14" ry="14" fill="#e6fcf5" stroke="#0ca678" stroke-width="2" />
+  <text x="985.4" y="201.48" fill="#087f5b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="985.4" dy="0" font-weight="600">Worker A 抢占领取 (epoch=1)</tspan>
+    <tspan x="985.4" dy="17.5">Storage.claim_next_run (storage.py)</tspan>
+    <tspan x="985.4" dy="17.5">PG: FOR UPDATE SKIP LOCKED</tspan>
+    <tspan x="985.4" dy="17.5">SQLite WAL: BEGIN IMMEDIATE 排他写锁</tspan>
+    <tspan x="985.4" dy="17.5">+ exclusive_run() 同机 OS flock 双保险</tspan>
+  </text>
+  <rect x="1364.2" y="166" width="541.6" height="132" rx="14" ry="14" fill="#fff9db" stroke="#f08c00" stroke-width="2" />
+  <text x="1635" y="201.48" fill="#e67700" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="1635" dy="0" font-weight="600">Worker A 心跳续租与假死超时</tspan>
+    <tspan x="1635" dy="17.5">LeaseWorker.heartbeat_loop (lease.py)</tspan>
+    <tspan x="1635" dy="17.5">按 1/3 TTL 周期调 heartbeat_lease()</tspan>
+    <tspan x="1635" dy="17.5">遭遇 GC / SIGSTOP / I/O 阻塞越过 lease_until</tspan>
+    <tspan x="1635" dy="17.5">锁繁忙超期则保守自杀 cancel 本地推理协程</tspan>
+  </text>
+  <rect x="2037.8" y="166" width="525.6" height="132" rx="14" ry="14" fill="#f3f0ff" stroke="#7048e8" stroke-width="2" />
+  <text x="2300.6" y="201.48" fill="#5f3dc4" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2300.6" dy="0" font-weight="600">Worker B 接管与跨节点工作区物化</tspan>
+    <tspan x="2300.6" dy="17.5">claim_next_run -&gt; epoch=2, takeover_count+1</tspan>
+    <tspan x="2300.6" dy="17.5">_materialize_workspace_if_needed()</tspan>
+    <tspan x="2300.6" dy="17.5">从 workspace_archives 表解压还原目录</tspan>
+    <tspan x="2300.6" dy="17.5">(direct_workspace 严禁归档防旧快照倒灌)</tspan>
+  </text>
+  <rect x="2695.4" y="166" width="513.6" height="132" rx="14" ry="14" fill="#fff5f5" stroke="#e03131" stroke-width="2" />
+  <text x="2952.2" y="201.48" fill="#c92a2a" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2952.2" dy="0" font-weight="600">毒丸任务死信隔离 (DLQ)</tspan>
+    <tspan x="2952.2" dy="17.5">takeover_count &gt;= max_takeovers (3 次)</tspan>
+    <tspan x="2952.2" dy="17.5">自动转入 queue_state='dead_letter'</tspan>
+    <tspan x="2952.2" dy="17.5">runs.status='failed' (DeadLetterExceeded)</tspan>
+    <tspan x="2952.2" dy="17.5">写入 run_dead_lettered 审计事件</tspan>
+  </text>
+  <rect x="98" y="372" width="1046" height="132" rx="14" ry="14" fill="#fff5f5" stroke="#e03131" stroke-width="2" />
+  <text x="621" y="416.23" fill="#c92a2a" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="621" dy="0" font-weight="600">全入口 Fencing Token 硬拦截门卫 (storage.py + tools.py)</tspan>
+    <tspan x="621" dy="17.5">Storage._verify_epoch_tx(expected_epoch) + runs.state_version CAS</tspan>
+    <tspan x="621" dy="17.5">覆盖 save_run / schedule_call / finish_call / apply_proposal / save_workspace_archive</tspan>
+    <tspan x="621" dy="17.5">Worker A 苏醒持旧 epoch=1 (!= 2) 写库或改文件 -&gt; 立即抛 StaleEpochError 阻断脑裂!</tspan>
+  </text>
+  <rect x="1276" y="372" width="670" height="132" rx="14" ry="14" fill="#f8f9fa" stroke="#495057" stroke-width="2" />
+  <text x="1611" y="407.48" fill="#212529" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="1611" dy="0" font-weight="600">僵尸节点止损 vs 优雅关机区分</tspan>
+    <tspan x="1611" dy="17.5">fenced_by_heartbeat: 记 worker_fenced</tspan>
+    <tspan x="1611" dy="17.5">递增 agent_lab_worker_fenced_total</tspan>
+    <tspan x="1611" dy="17.5">(严禁调 release_lease 污染新 Owner)</tspan>
+    <tspan x="1611" dy="17.5">SIGTERM 关机: 同步归档后退回 queued</tspan>
+  </text>
+  <rect x="2078" y="372" width="1131" height="132" rx="14" ry="14" fill="#ebfbee" stroke="#2f9e44" stroke-width="2" />
+  <text x="2643.5" y="416.23" fill="#2b8a3e" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2643.5" dy="0" font-weight="600">严格四步时序释放与出带记忆整理 (Out-of-Band auto_dream · lease.py / api.py)</tspan>
+    <tspan x="2643.5" dy="17.5">1. _sync_workspace_archive(epoch=2) -&gt; 2. release_lease('completed') -&gt; 3. 退出 exclusive_run 锁</tspan>
+    <tspan x="2643.5" dy="17.5">-&gt; 4. 独立新 Runtime 出带运行 dream(trigger='auto_post_session') [inline 模式投递独立 dream_jobs]</tspan>
+    <tspan x="2643.5" dy="17.5">核心不变量: 绝不在持锁期跑慢速 LLM 归纳，人类秒发追问 append_user_turn(epoch+1) 零冲突!</tspan>
+  </text>
+  <rect x="98" y="662" width="506.6" height="132" rx="14" ry="14" fill="#edf2ff" stroke="#3b5bdb" stroke-width="2" />
+  <text x="351.3" y="697.48" fill="#364fc7" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="351.3" dy="0" font-weight="600">双层排他锁与防软硬链接逃逸</tspan>
+    <tspan x="351.3" dy="17.5">进程内 RLock + _cross_process_apply_lock</tspan>
+    <tspan x="351.3" dy="17.5">O_NOFOLLOW 打开 apply-&lt;ws_hash&gt;.lock</tspan>
+    <tspan x="351.3" dy="17.5">flock 后复核 fstat vs stat(st_dev/st_ino)</tspan>
+    <tspan x="351.3" dy="17.5">防 flock+unlink 竞态 &amp; 拒 st_nlink != 1</tspan>
+  </text>
+  <rect x="736.6" y="662" width="564.6" height="132" rx="14" ry="14" fill="#e7f5ff" stroke="#1971c2" stroke-width="2" />
+  <text x="1018.9" y="697.48" fill="#1864ab" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="1018.9" dy="0" font-weight="600">全集 SHA-256 三态 CAS 预检</tspan>
+    <tspan x="1018.9" dy="17.5">verify_worktree_baseline + _inspect_apply_target</tspan>
+    <tspan x="1018.9" dy="17.5">全达 m_post -&gt; 幂等补标 already_applied</tspan>
+    <tspan x="1018.9" dy="17.5">任一 ¬(m_pre ∨ m_post) -&gt; version_conflict</tspan>
+    <tspan x="1018.9" dy="17.5">全 m_pre 或混合态 -&gt; 进入 WAL 前滚流</tspan>
+  </text>
+  <rect x="1433.2" y="662" width="519.6" height="132" rx="14" ry="14" fill="#fff9db" stroke="#f08c00" stroke-width="2" />
+  <text x="1693" y="697.48" fill="#e67700" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="1693" dy="0" font-weight="600">写前日志原子落盘 (WAL Journal)</tspan>
+    <tspan x="1693" dy="17.5">ToolRegistry._write_apply_journal()</tspan>
+    <tspan x="1693" dy="17.5">写 .agent-journal-tmp-* + flush + fsync</tspan>
+    <tspan x="1693" dy="17.5">os.replace -&gt; .agent-apply-&lt;pid&gt;.json</tspan>
+    <tspan x="1693" dy="17.5">固化各文件 action / old_sha256 / new_sha256</tspan>
+  </text>
+  <rect x="2084.8" y="662" width="478.6" height="132" rx="14" ry="14" fill="#f3f0ff" stroke="#7048e8" stroke-width="2" />
+  <text x="2324.1" y="697.48" fill="#5f3dc4" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2324.1" dy="0" font-weight="600">同目录暂存与二次 Epoch/CAS 复核</tspan>
+    <tspan x="2324.1" dy="17.5">仅对未达 m_post 的 pending 项生成</tspan>
+    <tspan x="2324.1" dy="17.5">.agent-patch-* 临时文件并 os.fsync()</tspan>
+    <tspan x="2324.1" dy="17.5">置换前二次 verify_epoch() + 复核 m_pre</tspan>
+    <tspan x="2324.1" dy="17.5">封死预检到替换间的并发篡改窗口</tspan>
+  </text>
+  <rect x="2695.4" y="662" width="513.6" height="132" rx="14" ry="14" fill="#ebfbee" stroke="#2f9e44" stroke-width="2" />
+  <text x="2952.2" y="697.48" fill="#2b8a3e" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2952.2" dy="0" font-weight="600">os.replace 原子切换与断电前滚补齐</tspan>
+    <tspan x="2952.2" dy="17.5">逐文件 os.replace(temporary, target)</tspan>
+    <tspan x="2952.2" dy="17.5">中途断电/SIGKILL 重启后自动识别 WAL:</tspan>
+    <tspan x="2952.2" dy="17.5">跳过已达 m_post 文件，前滚补齐剩余文件</tspan>
+    <tspan x="2952.2" dy="17.5">绝不留半截损坏态! 完成后删 WAL 并置 applied</tspan>
+  </text>
+  <rect x="98" y="868" width="1028" height="132" rx="14" ry="14" fill="#f8f9fa" stroke="#495057" stroke-width="2" />
+  <text x="612" y="912.23" fill="#212529" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="612" dy="0" font-weight="600">能力安全边界与提案创建幂等键 (tools.py + storage.py)</tspan>
+    <tspan x="612" dy="17.5">apply_proposal 永不暴露于 definitions() / _validators (根绝提示注入自我审批)</tspan>
+    <tspan x="612" dy="17.5">部分唯一索引 proposals_operation(run_id, operation_id) 绑定 call_id 与参数摘要</tspan>
+    <tspan x="612" dy="17.5">弥合“提案已落库、tool_calls 账本未落盘”崩溃窗口，重放自动找回原 pending 提案</tspan>
+  </text>
+  <rect x="1258" y="868" width="1045" height="132" rx="14" ry="14" fill="#e6fcf5" stroke="#0ca678" stroke-width="2" />
+  <text x="1780.5" y="912.23" fill="#087f5b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="1780.5" dy="0" font-weight="600">非文件副作用动作“至多执行一次”防重放 (command / gui_action)</tspan>
+    <tspan x="1780.5" dy="17.5">bash_exec 与 computer_* 无磁盘文件哈希可事后推断，且不占文件补丁锁防阻塞读</tspan>
+    <tspan x="1780.5" dy="17.5">执行完立刻调 mark_action_proposal_executed(applied=True, execution_result)</tspan>
+    <tspan x="1780.5" dy="17.5">若在追加对话历史前崩溃，resume() 重入直接回放缓存 execution_result (绝不二次执行!)</tspan>
+  </text>
+  <rect x="2435" y="868" width="774" height="132" rx="14" ry="14" fill="#fff5f5" stroke="#e03131" stroke-width="2" />
+  <text x="2822" y="903.48" fill="#c92a2a" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2822" dy="0" font-weight="600">受保护测试与敏感凭据硬隔离</tspan>
+    <tspan x="2822" dy="17.5">_is_protected_test_path 禁改 tests/ · test_*</tspan>
+    <tspan x="2822" dy="17.5">_is_secret_path 禁读写 .env / *.pem / 密钥</tspan>
+    <tspan x="2822" dy="17.5">sandbox_test 强验 test_oracles SHA-256</tspan>
+    <tspan x="2822" dy="17.5">禁网只读非 root Docker 容器执行验收</tspan>
+  </text>
+  <rect x="98" y="1158" width="620.5" height="132" rx="14" ry="14" fill="#f3f0ff" stroke="#7048e8" stroke-width="2" />
+  <text x="408.25" y="1202.23" fill="#5f3dc4" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="408.25" dy="0" font-weight="600">多租户令牌鉴权与限流 (_GuardMiddleware · api.py)</tspan>
+    <tspan x="408.25" dy="17.5">AGENT_LAB_TOKENS_JSON 解析 Principal(tenant_id, actor_id, roles)</tspan>
+    <tspan x="408.25" dy="17.5">四级权限模型: operator / approver / admin / global_admin</tspan>
+    <tspan x="408.25" dy="17.5">hmac.compare_digest 常量时间验签 + _TenantRateLimiter 60s 滑窗限流</tspan>
+  </text>
+  <rect x="850.5" y="1158" width="686.5" height="132" rx="14" ry="14" fill="#fff9db" stroke="#f08c00" stroke-width="2" />
+  <text x="1193.75" y="1202.23" fill="#e67700" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="1193.75" dy="0" font-weight="600">异人复核门控 (4-Eyes Separation · api.py)</tspan>
+    <tspan x="1193.75" dy="17.5">POST /api/runs/{run_id}/proposals/{proposal_id}</tspan>
+    <tspan x="1193.75" dy="17.5">要求 approver / admin 角色；当 AGENT_LAB_REQUIRE_DISTINCT_APPROVER=1:</tspan>
+    <tspan x="1193.75" dy="17.5">强制校验 principal.actor_id != run.metadata['created_by'] (否则 403 拒绝自审)</tspan>
+  </text>
+  <rect x="98" y="1364" width="614" height="132" rx="14" ry="14" fill="#edf2ff" stroke="#3b5bdb" stroke-width="2" />
+  <text x="405" y="1408.23" fill="#364fc7" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="405" dy="0" font-weight="600">宿主目录边界门卫与产物 CSP 沙箱 (api.py + permissions.py)</tspan>
+    <tspan x="405" dy="17.5">_can_use_direct_workspace: 开启鉴权后仅 global_admin 或 local+admin</tspan>
+    <tspan x="405" dy="17.5">可挂载 local_cwd / workspace_path (外部租户强制隔离于临时沙箱与私有记忆域)</tspan>
+    <tspan x="405" dy="17.5">产物端点禁 .html/.svg 并强制下发 CSP: default-src 'none' 防同源 XSS</tspan>
+  </text>
+  <rect x="836" y="1364" width="701" height="132" rx="14" ry="14" fill="#ebfbee" stroke="#2f9e44" stroke-width="2" />
+  <text x="1186.5" y="1408.23" fill="#2b8a3e" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="1186.5" dy="0" font-weight="600">终态资源 GC 与 direct_workspace 绝对豁免 (storage.py)</tspan>
+    <tspan x="1186.5" dy="17.5">Storage.gc_expired_resources(retention_seconds=86400)</tspan>
+    <tspan x="1186.5" dy="17.5">自动回收超期终态任务的托管 workspaces/&lt;id&gt;、Git worktree、归档与陈旧锁</tspan>
+    <tspan x="1186.5" dy="17.5">安全铁律: 凡 metadata['direct_workspace']==True 无条件豁免目录删除，仅清锁与过期截图!</tspan>
+  </text>
+  <rect x="1757" y="1158" width="670" height="132" rx="14" ry="14" fill="#e7f5ff" stroke="#1971c2" stroke-width="2" />
+  <text x="2092" y="1202.23" fill="#1864ab" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2092" dy="0" font-weight="600">W3C Trace Context 全链路透传 (observability.py)</tspan>
+    <tspan x="2092" dy="17.5">_parse_trace_input 严格校验 00-&lt;32hex&gt;-&lt;16hex&gt;-01 (拒 version=ff 与全零 ID)</tspan>
+    <tspan x="2092" dy="17.5">非法控制字符输入统一做 SHA-256[:32] 定长化，彻底阻断日志伪造注入</tspan>
+    <tspan x="2092" dy="17.5">HTTP traceparent -&gt; ContextVar -&gt; runs.metadata -&gt; LeaseWorker -&gt; X-Trace-Id</tspan>
+  </text>
+  <rect x="2551" y="1158" width="658" height="132" rx="14" ry="14" fill="#fff5f5" stroke="#e03131" stroke-width="2" />
+  <text x="2880" y="1202.23" fill="#c92a2a" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2880" dy="0" font-weight="600">零信任递归凭据脱敏与安全错误摘要 (observability.py)</tspan>
+    <tspan x="2880" dy="17.5">redact_secrets(): 递归屏蔽 key/token/secret/authorization/password/credential</tspan>
+    <tspan x="2880" dy="17.5">正则擦除字符串内嵌 Bearer 令牌与 DSN 连接串密码 (://user:[REDACTED]@host)</tspan>
+    <tspan x="2880" dy="17.5">sanitize_error_detail(): 剥离原始异常隐私，仅输出 error_type / code / trace_id</tspan>
+  </text>
+  <rect x="1757" y="1364" width="673" height="132" rx="14" ry="14" fill="#e6fcf5" stroke="#0ca678" stroke-width="2" />
+  <text x="2093.5" y="1408.23" fill="#087f5b" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2093.5" dy="0" font-weight="600">生产存活与深度就绪探针 (/healthz &amp; /readyz · api.py)</tspan>
+    <tspan x="2093.5" dy="17.5">/healthz: 零开销事件循环存活探针 -&gt; 200 {'status': 'alive'}</tspan>
+    <tspan x="2093.5" dy="17.5">/readyz: 线程池执行 _probe_readiness (未就绪返 503 摘除流量):</tspan>
+    <tspan x="2093.5" dy="17.5">核验 DB SELECT 1、workspaces 真实写文件探针、Docker/远程沙箱与活跃 Worker 数</tspan>
+  </text>
+  <rect x="2562" y="1364" width="647" height="132" rx="14" ry="14" fill="#ebfbee" stroke="#2f9e44" stroke-width="2" />
+  <text x="2885.5" y="1408.23" fill="#2b8a3e" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="14" text-anchor="middle">
+    <tspan x="2885.5" dy="0" font-weight="600">线程安全指标注册表与 Prometheus 导出 (MetricsRegistry)</tspan>
+    <tspan x="2885.5" dy="17.5">支持 Counter / Gauge / 累积桶 Histogram -&gt; GET /metrics (0.0.4 文本格式)</tspan>
+    <tspan x="2885.5" dy="17.5">防御 Python isinstance(True, int) 陷阱，显式拒绝 bool 污染监控曲线</tspan>
+    <tspan x="2885.5" dy="17.5">render_prometheus() 锁内浅拷贝快照、锁外排序拼接，高频抓取零业务阻塞!</tspan>
+  </text>
+  <polyline points="606.6,232 737.1,232" fill="none" stroke="#1971c2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-1971c2)" />
+  <rect x="646.72" y="215.1" width="51.76" height="33.8" rx="4" ry="4" fill="#f1f8ff" fill-opacity="0.92" />
+  <text x="672.6" y="228.64" fill="#1971c2" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="672.6" dy="0">单事务</tspan>
+    <tspan x="672.6" dy="14.4">queued</tspan>
+  </text>
+  <polyline points="1232.2,232 1362.7,232" fill="none" stroke="#0ca678" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-0ca678)" />
+  <rect x="1268.2" y="215.1" width="60" height="33.8" rx="4" ry="4" fill="#f1f8ff" fill-opacity="0.92" />
+  <text x="1298.2" y="228.64" fill="#0ca678" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="1298.2" dy="0">epoch=1</tspan>
+    <tspan x="1298.2" dy="14.4">持锁续租</tspan>
+  </text>
+  <polyline points="1905.8,232 2036.3,232" fill="none" stroke="#e67700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-e67700)" />
+  <rect x="1918.92" y="215.1" width="105.76" height="33.8" rx="4" ry="4" fill="#f1f8ff" fill-opacity="0.92" />
+  <text x="1971.8" y="228.64" fill="#e67700" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="1971.8" dy="0">超 lease_until</tspan>
+    <tspan x="1971.8" dy="14.4">抢占接管</tspan>
+  </text>
+  <polyline points="2563.4,232 2693.9,232" fill="none" stroke="#e03131" stroke-width="2" stroke-dasharray="8 6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-e03131)" />
+  <rect x="2596.56" y="215.1" width="65.68" height="33.8" rx="4" ry="4" fill="#f1f8ff" fill-opacity="0.92" />
+  <text x="2629.4" y="228.64" fill="#e03131" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="2629.4" dy="0">takeover</tspan>
+    <tspan x="2629.4" dy="14.4">&gt;= 3 次</tspan>
+  </text>
+  <path d="M 1635 298 L 1635 323 Q 1635 335 1623 335 L 633 335 Q 621 335 621 347 L 621 370.5" fill="none" stroke="#e03131" stroke-width="2" stroke-dasharray="8 6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-e03131)" />
+  <rect x="1007.08" y="325.3" width="241.84" height="19.4" rx="4" ry="4" fill="#f1f8ff" fill-opacity="0.92" />
+  <text x="1128" y="338.84" fill="#e03131" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">Worker A 苏醒写库/改盘 (旧 epoch=1)</text>
+  <polyline points="1144,438 1274.5,438" fill="none" stroke="#e03131" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-e03131)" />
+  <rect x="1152.5" y="421.1" width="115" height="33.8" rx="4" ry="4" fill="#f1f8ff" fill-opacity="0.92" />
+  <text x="1210" y="434.64" fill="#e03131" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="1210" dy="0">触发</tspan>
+    <tspan x="1210" dy="14.4">StaleEpochError</tspan>
+  </text>
+  <path d="M 2300.6 298 L 2300.6 323 Q 2300.6 335 2312.6 335 L 2631.5 335 Q 2643.5 335 2643.5 347 L 2643.5 370.5" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-2f9e44)" />
+  <rect x="2337.21" y="325.3" width="269.68" height="19.4" rx="4" ry="4" fill="#f1f8ff" fill-opacity="0.92" />
+  <text x="2472.05" y="338.84" fill="#2f9e44" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">epoch=2 归档 + release_lease 后出带触发</text>
+  <path d="M 621 504 L 475.11 567.23 Q 464.1 572 452.1 572 L 363.3 572 Q 351.3 572 351.3 584 L 351.3 660.5" fill="none" stroke="#c92a2a" stroke-width="2" stroke-dasharray="8 6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-c92a2a)" />
+  <rect x="273.82" y="562.3" width="267.76" height="19.4" rx="4" ry="4" fill="#ffffff" fill-opacity="0.92" />
+  <text x="407.7" y="575.84" fill="#c92a2a" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">apply_proposal 前后双重 verify_epoch()</text>
+  <polyline points="604.6,728 735.1,728" fill="none" stroke="#3b5bdb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-3b5bdb)" />
+  <rect x="640.6" y="711.1" width="60" height="33.8" rx="4" ry="4" fill="#fffdf0" fill-opacity="0.92" />
+  <text x="670.6" y="724.64" fill="#3b5bdb" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="670.6" dy="0">双重互斥</tspan>
+    <tspan x="670.6" dy="14.4">就绪</tspan>
+  </text>
+  <polyline points="1301.2,728 1431.7,728" fill="none" stroke="#1971c2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-1971c2)" />
+  <rect x="1335.2" y="711.1" width="64" height="33.8" rx="4" ry="4" fill="#fffdf0" fill-opacity="0.92" />
+  <text x="1367.2" y="724.64" fill="#1971c2" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="1367.2" dy="0">m_pre 或</tspan>
+    <tspan x="1367.2" dy="14.4">混合态</tspan>
+  </text>
+  <polyline points="1952.8,728 2083.3,728" fill="none" stroke="#e67700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-e67700)" />
+  <rect x="1980.68" y="711.1" width="76.24" height="33.8" rx="4" ry="4" fill="#fffdf0" fill-opacity="0.92" />
+  <text x="2018.8" y="724.64" fill="#e67700" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="2018.8" dy="0">WAL</tspan>
+    <tspan x="2018.8" dy="14.4">fsync 完成</tspan>
+  </text>
+  <polyline points="2563.4,728 2693.9,728" fill="none" stroke="#7048e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-7048e8)" />
+  <rect x="2596.4" y="711.1" width="66" height="33.8" rx="4" ry="4" fill="#fffdf0" fill-opacity="0.92" />
+  <text x="2629.4" y="724.64" fill="#7048e8" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="2629.4" dy="0">二次 CAS</tspan>
+    <tspan x="2629.4" dy="14.4">校验通过</tspan>
+  </text>
+  <polyline points="1126,934 1256.5,934" fill="none" stroke="#0ca678" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-0ca678)" />
+  <rect x="1148.72" y="917.1" width="86.56" height="33.8" rx="4" ry="4" fill="#fffdf0" fill-opacity="0.92" />
+  <text x="1192" y="930.64" fill="#0ca678" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="1192" dy="0">动作提案</tspan>
+    <tspan x="1192" dy="14.4">command/gui</tspan>
+  </text>
+  <polyline points="2303,934 2433.5,934" fill="none" stroke="#495057" stroke-width="2" stroke-dasharray="8 6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-495057)" />
+  <rect x="2332.5" y="917.1" width="73" height="33.8" rx="4" ry="4" fill="#fffdf0" fill-opacity="0.92" />
+  <text x="2369" y="930.64" fill="#495057" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="2369" dy="0">落盘后运行</tspan>
+    <tspan x="2369" dy="14.4">受保护测试</tspan>
+  </text>
+  <path d="M 612 868 L 319.91 832.45 Q 308 831 320 831 L 339.3 831 Q 351.3 831 351.3 819 L 351.3 795.5" fill="none" stroke="#495057" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-495057)" />
+  <rect x="229.65" y="821.3" width="200" height="19.4" rx="4" ry="4" fill="#fffdf0" fill-opacity="0.92" />
+  <text x="329.65" y="834.84" fill="#495057" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">人类审批通过 -&gt; 文件补丁集分支</text>
+  <polyline points="718.5,1224 849,1224" fill="none" stroke="#7048e8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-7048e8)" />
+  <rect x="748.18" y="1207.1" width="72.64" height="33.8" rx="4" ry="4" fill="#faf8ff" fill-opacity="0.92" />
+  <text x="784.5" y="1220.64" fill="#7048e8" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="784.5" dy="0">验签解析</tspan>
+    <tspan x="784.5" dy="14.4">Principal</tspan>
+  </text>
+  <polyline points="408.25,1290 405.11,1362.5" fill="none" stroke="#3b5bdb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-3b5bdb)" />
+  <rect x="334.12" y="1317.3" width="145" height="19.4" rx="4" ry="4" fill="#faf8ff" fill-opacity="0.92" />
+  <text x="406.62" y="1330.84" fill="#3b5bdb" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">校验租户与 admin 角色</text>
+  <polyline points="712,1430 834.5,1430" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-2f9e44)" />
+  <rect x="737.68" y="1413.1" width="72.64" height="33.8" rx="4" ry="4" fill="#faf8ff" fill-opacity="0.92" />
+  <text x="774" y="1426.64" fill="#2f9e44" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="774" dy="0">打标</tspan>
+    <tspan x="774" dy="14.4">direct_ws</tspan>
+  </text>
+  <path d="M 1193.75 1158 L 1193.75 1080 Q 1193.75 1068 1181.75 1068 L 623.95 1068 Q 611.95 1068 611.95 1056 L 611.95 1001.5" fill="none" stroke="#e67700" stroke-width="2" stroke-dasharray="8 6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-e67700)" />
+  <rect x="753.18" y="1058.3" width="299.44" height="19.4" rx="4" ry="4" fill="#ffffff" fill-opacity="0.92" />
+  <text x="902.9" y="1071.84" fill="#e67700" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">异人复核批准 -&gt; approve_and_enqueue 唤醒执行</text>
+  <polyline points="2427,1224 2549.5,1224" fill="none" stroke="#1971c2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-1971c2)" />
+  <rect x="2456.16" y="1207.1" width="65.68" height="33.8" rx="4" ry="4" fill="#f4fce3" fill-opacity="0.92" />
+  <text x="2489" y="1220.64" fill="#1971c2" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="2489" dy="0">注入</tspan>
+    <tspan x="2489" dy="14.4">trace_id</tspan>
+  </text>
+  <polyline points="2092,1290 2093.47,1362.5" fill="none" stroke="#0ca678" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-0ca678)" />
+  <rect x="2018.75" y="1317.3" width="148" height="19.4" rx="4" ry="4" fill="#f4fce3" fill-opacity="0.92" />
+  <text x="2092.75" y="1330.84" fill="#0ca678" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">请求链路耗时与健康检查</text>
+  <polyline points="2430,1430 2560.5,1430" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-2f9e44)" />
+  <rect x="2459" y="1413.1" width="74" height="33.8" rx="4" ry="4" fill="#f4fce3" fill-opacity="0.92" />
+  <text x="2496" y="1426.64" fill="#2f9e44" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="2496" dy="0">汇聚 HTTP</tspan>
+    <tspan x="2496" dy="14.4">与队列指标</tspan>
+  </text>
+  <polyline points="1537,1224 1755.5,1224" fill="none" stroke="#1971c2" stroke-width="2" stroke-dasharray="8 6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#mk-end-arrow-1971c2)" />
+  <rect x="1603.72" y="1207.1" width="86.56" height="33.8" rx="4" ry="4" fill="#ffffff" fill-opacity="0.92" />
+  <text x="1647" y="1220.64" fill="#1971c2" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="12" text-anchor="middle">
+    <tspan x="1647" dy="0">透传 W3C</tspan>
+    <tspan x="1647" dy="14.4">traceparent</tspan>
+  </text>
+  <text x="60" y="1566.29" fill="#343a40" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif" font-size="13" text-anchor="start">生产级高可用四大铁律总结：① 任何进程内状态均非真值源，Fencing Token (epoch) + state_version CAS 在数据库与文件系统双入口拦截超时僵尸 Worker；② 多文件补丁通过 .agent-apply-&lt;pid&gt;.json 写前日志实现断电自动前滚 (Roll-Forward)，非文件动作凭 execution_result 实现至多一次执行；③ 异人复核 (4-Eyes) 阻断自审，GC 无条件豁免 direct_workspace；④ W3C traceparent 全链路贯通且 redact_secrets 零信任脱敏。</text>
+</svg>

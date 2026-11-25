@@ -298,3 +298,208 @@ async def test_send_message_repairs_dangling_tool_use_after_mid_batch_abort(tmp_
     assert recovered["status"] == "completed"
     assert "恢复正常" in recovered["answer"]
 
+
+def test_slow_command_approval_transitions_running_immediately_and_debounces_double_click(
+    tmp_path, monkeypatch
+):
+    """回归验证：批准耗时命令后，任务状态立即从 waiting_approval 切为 running（不再残留待审批），且并发重复点击幂等返回 202。"""
+    state_dir = tmp_path / "state"
+    ws_dir = tmp_path / "slow_cmd_ws"
+    ws_dir.mkdir()
+
+    class SlowCmdProvider:
+        def __init__(self):
+            self.step = 0
+
+        async def complete(self, system, messages, tools, max_tokens=2048, **kwargs):
+            self.step += 1
+            has_approved = any(
+                isinstance(m.get("content"), str) and m["content"].startswith("REVIEW_APPROVED:")
+                for m in messages
+            )
+            if not has_approved:
+                return _resp(
+                    [_call("bash_exec", command="python3 -c 'import time; time.sleep(0.35); print(\"SLOW_OK\")'")]
+                )
+            return _resp([{"type": "text", "text": "### 结论\n\n- **状态**: `SLOW_OK` 已执行完毕。"}])
+
+    monkeypatch.setattr("agent_lab.runtime.get_provider", lambda _name: SlowCmdProvider())
+    app = create_app(state_dir=state_dir, provider="demo")
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/runs",
+            json={
+                "prompt": "运行耗时检查命令",
+                "template": "local_cwd",
+                "workspace_path": str(ws_dir),
+                "permission_mode": "auto-edit",
+            },
+        )
+        assert created.status_code == 202
+        run_id = created.json()["id"]
+        detail = None
+        for _ in range(30):
+            detail = client.get(f"/api/runs/{run_id}").json()
+            if detail["status"] == "waiting_approval":
+                break
+            time.sleep(0.03)
+        assert detail is not None and detail["status"] == "waiting_approval"
+        pid = detail["proposals"][0]["id"]
+
+        # 批准瞬间返回 202，紧接着即使命令仍在 sleep(0.35)，重复点击幂等返回 202（不报 409），且轮询可见 running/job_active
+        r1 = client.post(f"/api/runs/{run_id}/proposals/{pid}", json={"approved": True})
+        assert r1.status_code == 202
+        r2 = client.post(f"/api/runs/{run_id}/proposals/{pid}", json={"approved": True})
+        assert r2.status_code == 202
+        mid = client.get(f"/api/runs/{run_id}").json()
+        assert mid["status"] in {"running", "completed"} or mid["job_active"] is True
+        assert mid["proposals"][0]["status"] == "approved"
+
+        for _ in range(40):
+            done = client.get(f"/api/runs/{run_id}").json()
+            if done["status"] == "completed":
+                break
+            time.sleep(0.05)
+        assert done["status"] == "completed"
+        assert "SLOW_OK" in done["answer"]
+
+
+async def test_multiple_concurrent_local_agents_and_operator_subagents_run_safely(tmp_path, monkeypatch):
+    """验证多个本地操控 Agent 同时并发运行（含跨进程 GUI 席位锁、独立 Git Worktree 隔离与执行型 operator 子 Agent）。"""
+    import asyncio
+    from agent_lab.computer import MockComputerBackend
+    from agent_lab.git_repo import init_git_repo_from_dir
+
+    state_dir = tmp_path / "state"
+    origin_dir = tmp_path / "origin_repo"
+    init_git_repo_from_dir(ROOT / "data/sample_repo", origin_dir)
+    storage = Storage(state_dir / "state.db")
+
+    # 1. 验证单个 Agent 内通过 subagent_run(mode="operator") 并发派生两个本地写文件 + 跑命令的子 Agent
+    class OperatorSubagentProvider:
+        async def complete(self, system, messages, tools, max_tokens=2048, **kwargs):
+            role = system.split("\nROLE:", 1)[1].splitlines()[0] if "\nROLE:" in system else "coordinator"
+            has_tool_res = any(
+                isinstance(m.get("content"), list)
+                and any(b.get("type") == "tool_result" for b in m["content"])
+                for m in messages
+            )
+            if role == "coordinator":
+                if not has_tool_res:
+                    return _resp(
+                        [
+                            _call(
+                                "subagent_run",
+                                tasks=[
+                                    {"role": "worker-a", "prompt": "写入 mod_a.py 并运行", "mode": "operator"},
+                                    {"role": "worker-b", "prompt": "写入 mod_b.py 并运行", "mode": "operator"},
+                                ],
+                            )
+                        ]
+                    )
+                return _resp([{"type": "text", "text": "两个执行型子 Agent 均已完成本地写入与脚本运行。"}])
+            target_file = "mod_a.py" if "worker-a" in role else "mod_b.py"
+            if not has_tool_res:
+                return _resp(
+                    [
+                        _call("fs_write", path=target_file, content=f"NAME = '{target_file}'\n"),
+                        _call("bash_exec", command=f"python3 -c \"print('{target_file}_OK')\""),
+                    ]
+                )
+            return _resp([{"type": "text", "text": f"{target_file} done"}])
+
+    shared_ws = tmp_path / "shared_local_ws"
+    shared_ws.mkdir()
+    rt_op = AgentRuntime(
+        storage,
+        shared_ws,
+        ROOT / "data/knowledge",
+        ROOT / "skills",
+        provider=OperatorSubagentProvider(),
+        execution_profile="computer",
+        permission_mode="full-auto",
+        computer_backend=MockComputerBackend(),
+    )
+    run_op = rt_op.create("并发执行型子 Agent 测试")
+    done_op = await rt_op.execute(run_op["id"])
+    await rt_op.aclose()
+    assert done_op["status"] == "completed"
+    assert (shared_ws / "mod_a.py").is_file() and (shared_ws / "mod_b.py").is_file()
+
+    # 2. 验证 3 个独立顶层本地 Agent 会话同时并发操作同一电脑（共享 GUI 席位锁 + 各自写文件/跑命令互不干扰）
+    gui_backend = MockComputerBackend()
+
+    class ConcurrentDesktopProvider:
+        def __init__(self, idx: int):
+            self.idx = idx
+            self.step = 0
+
+        async def complete(self, system, messages, tools, max_tokens=2048, **kwargs):
+            self.step += 1
+            if self.step == 1:
+                return _resp(
+                    [
+                        _call("fs_write", path=f"agent_{self.idx}.txt", content=f"hello from {self.idx}\n"),
+                        _call("computer_mouse", action="click", x=100 + self.idx * 20, y=200),
+                        _call("bash_exec", command=f"python3 -c 'print(\"AGENT_{self.idx}_DONE\")'"),
+                    ]
+                )
+            return _resp([{"type": "text", "text": f"Agent {self.idx} 完成"}])
+
+    runtimes = [
+        AgentRuntime(
+            storage,
+            shared_ws,
+            ROOT / "data/knowledge",
+            ROOT / "skills",
+            provider=ConcurrentDesktopProvider(i),
+            execution_profile="computer",
+            permission_mode="full-auto",
+            computer_backend=gui_backend,
+        )
+        for i in range(3)
+    ]
+    created_runs = [rt.create(f"并行本地任务 {i}") for i, rt in enumerate(runtimes)]
+    results = await asyncio.gather(*(rt.execute(r["id"]) for rt, r in zip(runtimes, created_runs)))
+    for rt in runtimes:
+        await rt.aclose()
+
+    assert all(r["status"] == "completed" for r in results)
+    for i in range(3):
+        assert (shared_ws / f"agent_{i}.txt").read_text(encoding="utf-8") == f"hello from {i}\n"
+    assert len([h for h in gui_backend.history if h["type"] == "mouse"]) == 3
+
+    # 3. 验证 Web API 同时启动多个 isolate_worktree=True 的本地 Git 仓库 Agent 互不污染源码
+    monkeypatch.setattr(
+        "agent_lab.runtime.get_provider",
+        lambda _name: ConcurrentDesktopProvider(9),
+    )
+    app = create_app(state_dir=state_dir, provider="demo")
+    with TestClient(app) as client:
+        wt_r1 = client.post(
+            "/api/runs",
+            json={
+                "prompt": "Worktree Agent 1",
+                "template": "local_cwd",
+                "workspace_path": str(origin_dir),
+                "permission_mode": "full-auto",
+                "isolate_worktree": True,
+            },
+        )
+        wt_r2 = client.post(
+            "/api/runs",
+            json={
+                "prompt": "Worktree Agent 2",
+                "template": "local_cwd",
+                "workspace_path": str(origin_dir),
+                "permission_mode": "full-auto",
+                "isolate_worktree": True,
+            },
+        )
+        assert wt_r1.status_code == 202 and wt_r2.status_code == 202
+        assert wt_r1.json()["id"] != wt_r2.json()["id"]
+        # 原始仓库目录未被直接塞入 agent_9.txt，两个并发 Agent 均在各自独立 worktree 中运行
+        assert not (origin_dir / "agent_9.txt").exists()
+
+
