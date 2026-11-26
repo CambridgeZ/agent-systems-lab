@@ -2,6 +2,10 @@
 
 这条路线以“能运行、能解释、能修改、能验证”为验收标准。每天约 1—2 小时；先保留一份原始运行报告，再开始练习修改。前半段不需要模型密钥。真实模型与容器实验只在具备相应环境时进行，并单独记录尚未完成的验证。
 
+> **配套源码级大典与前沿复盘（当前验证基线：43 个 Python 模块 · 8 步 `schema_migrations` · 617 项离线 + 1 项真实 PostgreSQL 测试 · 17/17 离线评测 · PR `#1` `a674d9f` 11/11 CI & GitGuardian 全绿）**：
+> - **[7 卷全栈工程设计大典总导航 (`docs/design/README.md`)](design/README.md)** — 全仓 48 个核心源码/脚本文件（+2 个协议模板）→ 卷次速查表、4 条端到端请求生命周期全链路走读与按角色阅读路线，建议每日精读代码时对照查阅。
+> - **[2026 前沿 Agent Harness 架构设计与复盘手册 (`docs/frontier-harness-engineering.md`)](frontier-harness-engineering.md)** — 完成 14 天主线后用于进阶研读 4 批次 12/12 前沿能力（Plan Mode、CaMeL/DLP、PTC、Horizon 战役、Shadow Workspace、Merkle 代码索引、Playwright ARIA、MCP/A2A、Brain/Hands 解耦、Cron/Webhook 与 Trace→Eval 飞轮）。
+
 所有命令从仓库根目录执行。初次准备：
 
 ```bash
@@ -35,15 +39,16 @@ uv run --no-sync agent-lab demo --mode workflow
 uv run --no-sync agent-lab demo --mode parallel
 ```
 
-第 12 天的回归命令：
+第 12 天的回归命令（当前主干基线：**617 项离线测试 + 1 项真实 PostgreSQL 集成测试**、**17 / 17 核心与子系统离线评测**、PR `#1` `a674d9f` **11 / 11 CI & GitGuardian 全绿**）：
 
 ```bash
 uv run --no-sync pytest -q
 uv run --no-sync agent-lab eval --report reports/eval.json
-uv run --no-sync ruff check src tests
+uv run --no-sync agent-lab eval --suite subsystems --report reports/eval-subsystems.json
+uv run --no-sync ruff check src tests scripts
 ```
 
-`--no-sync` 使用已安装的开发与 MCP 依赖，避免后续普通命令改变可选依赖集合。任务 JSON 中的 10 个场景检查审批、恢复、冲突、幂等、预算和三个模式；它们不构成 10 个独立真实编码缺陷的模型能力评测。
+`--no-sync` 使用已安装的开发与 MCP 依赖，避免后续普通命令改变可选依赖集合。离线评测套件共 **17 / 17** 项（10 个核心控制流场景覆盖审批、恢复、冲突、幂等、预算与三种模式 + 7 大核心子系统离线评测）；它们检验 harness 不变量，不构成真实 LLM 编码能力评测。
 
 ## 建议留下的学习成果
 
@@ -100,3 +105,7 @@ uv run --no-sync ruff check src tests
 2. **原生桌面操控与多模态缓存对齐**：阅读 [`computer.py`](../src/agent_lab/computer.py) → [`providers.py`](../src/agent_lab/providers.py)，配跑 `pytest tests/test_computer_use.py -q`，理解 macOS CoreGraphics 64 位指针防截断、ARM64 非变参 ABI、Retina 逻辑点缩放以及尾部瞬态图像块如何保住 100% 历史 KV Cache。
 3. **动态子 Agent 与外部 MCP Client**：阅读 [`mcp_client.py`](../src/agent_lab/mcp_client.py) → [`runtime.py`](../src/agent_lab/runtime.py)（`_dispatch_call` 与 `_invoke_subagent_run`）→ [`repl.py`](../src/agent_lab/repl.py)，配跑 `pytest tests/test_subagent_and_mcp_client.py tests/test_multiturn_repl_and_web.py -q`。
 4. **海马体—新皮层双系统跨会话记忆**：阅读 [`memory.py`](../src/agent_lab/memory.py) → [`retrieval.py`](../src/agent_lab/retrieval.py)，配跑 `pytest tests/test_agent_memory_and_dreaming.py -q`，理解 `<=200` 行 `MEMORY.md` 头部预载、互链 Wiki + Transcript 混合 RRF 检索，以及无锁 LLM 合成 + 短 `flock` 提交的四阶段离线 Dreaming。
+5. **2026 前沿 Harness（Batch 1—Batch 4）、多协议网关与双向 A2A**：通读 [2026 前沿 Agent Harness 架构设计与复盘手册](frontier-harness-engineering.md) 并按 [7 卷全栈工程设计大典总导航](design/README.md) 速查对应模块——依次精读 [`egress_dlp.py`](../src/agent_lab/egress_dlp.py) / [`gateways.py`](../src/agent_lab/gateways.py) / [`a2a.py`](../src/agent_lab/a2a.py) / [`ptc.py`](../src/agent_lab/ptc.py) / [`horizon.py`](../src/agent_lab/horizon.py) / [`shadow_workspace.py`](../src/agent_lab/shadow_workspace.py) / [`code_index.py`](../src/agent_lab/code_index.py) / [`browser.py`](../src/agent_lab/browser.py) / [`execution_backend.py`](../src/agent_lab/execution_backend.py) / [`turn_pipeline.py`](../src/agent_lab/turn_pipeline.py) / [`triggers.py`](../src/agent_lab/triggers.py) / [`eval_flywheel.py`](../src/agent_lab/eval_flywheel.py)，并配跑：
+   ```bash
+   uv run --no-sync pytest tests/test_batch1_plan_dlp_native_ctx_edit.py tests/test_batch2_ptc_horizon_shadow.py tests/test_batch3_merkle_browser_protocols.py tests/test_batch4_backends_triggers_flywheel_middleware.py tests/test_multi_protocol_gateways.py tests/test_a2a_protocol.py -q
+   ```

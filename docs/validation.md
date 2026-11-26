@@ -1,24 +1,31 @@
 # 验证记录
 
-日期：2026-11-23。此记录区分工程回归、模型能力与代码执行环境；15 项生产级高可用加固的完整设计与验证映射见 [production-ha-hardening.md](production-ha-hardening.md)，本地直连操控、桌面级 Computer Use、MCP Client 与分层 Dreaming 记忆的架构说明见 [computer-use-and-memory-architecture.md](computer-use-and-memory-architecture.md)。
+日期：2026-11-26（对应主干合并提交 PR `#1` `a674d9f`）。此记录严格区分工程回归、模型能力与代码执行环境：
+- 全仓 48 个核心源码/脚本文件 + 2 个协议模板的源码级架构映射与评测/运维体系详述见 **[7 卷全栈工程设计大典总导航 (`docs/design/README.md`)](design/README.md)**（测试、评测与运维专题见 [Volume 07](design/07-evaluation-testing-and-operations.md)）；
+- Batch 1—Batch 4 全部 12 项 2026 前沿 Harness 方案的设计权衡与复盘见 **[2026 前沿 Agent Harness 架构设计与复盘手册 (`docs/frontier-harness-engineering.md`)](frontier-harness-engineering.md)**；
+- 15 项生产级高可用加固的完整设计与验证映射见 [production-ha-hardening.md](production-ha-hardening.md)，本地直连操控、桌面级 Computer Use、MCP Client 与分层 Dreaming 记忆的架构说明见 [computer-use-and-memory-architecture.md](computer-use-and-memory-architecture.md)。
 
-## 本机已完成
+## 当前主干已验证基线（PR `#1` · `a674d9f`）
+
+> **仓库规模基线**：**43 个 Python 模块（`src/agent_lab/*.py`）** + 3 个 Web 前端文件（`web/*`）+ 2 个工具/验证脚本（`scripts/*.py`）+ 2 个声明式协议模板（`gateways.example.json`、`a2a.example.json`）；**8 步版本化 `schema_migrations`（16 张物理表）**；47 个测试套件文件（`tests/test_*.py`）。
 
 | 验证 | 结果 | 覆盖内容 |
 |---|---|---|
-| `pytest -q` | **401 passed** | 覆盖全部 15 项生产级高可用加固维度、本地直连文件系统与进程组脱敏 `bash_exec`、三级权限策略（`ask`/`auto-edit`/`full-auto`）、桌面级 GUI Computer Use 与多模态视觉注入、动态 `subagent_run` 与外部 `McpClientManager`、多轮交互工作台（`agent-lab code`）以及双层分层记忆 + 互链 Wiki + 四阶段离线 Dreaming 引擎 |
-| `pytest tests/test_git_ha.py tests/test_production_api_ha.py -q` | **16 passed（8 + 8）** | 新增专项高可用回归套件：`test_git_ha.py` 验证跨节点 `workspace_archives` 打包物化/解包防炸弹、单调世代拦截、原子 Git origin 初始化、全扩展名凭证拦截与源仓零污染；`test_production_api_ha.py` 验证多租户 RBAC、异人审批、滑动限流、请求体 413 拦截、`/healthz` & `/readyz` & `/metrics`、W3C `traceparent` 透传、脱敏结构化 `error_detail`、单事务 `approve_and_enqueue` 与运行中协作取消 |
-| `ruff check src tests scripts` | 通过 | Python 静态检查（含新增 `observability.py`、`test_git_ha.py`、`test_production_api_ha.py`） |
-| `node --check web/app.js` | 通过 | 浏览器脚本语法（含单飞互斥轮询、`after=eventCursor` 增量事件游标与按需 RepoMap 缓存） |
+| `pytest -q`（离线全量测试套件） | **617 passed** | 覆盖全部 43 个 Python 模块与 47 个测试文件：核心控制流、15 项生产高可用加固、多协议网关（`gateways.py`）、双向 A2A 协议（`a2a.py`）、Batch 1—Batch 4 全部 12 项 2026 前沿 Harness 能力（Plan Mode、CaMeL/Egress DLP、三厂商原生上下文/缓存、四级模糊编辑、PTC、Horizon 战役、Shadow Workspaces、Merkle 增量代码索引、Playwright ARIA、MCP 2025/2026、Brain/Hands 执行后端、`TurnPipeline`、Cron/Webhook 触发器与 Trace→Eval 回归飞轮）、本地直连/OS 沙箱/PTY/LSP、桌面 GUI Computer Use、动态子 Agent、交互式 REPL 与 Web Workbench v11 |
+| 真实 PostgreSQL 16 集成测试（`AGENT_LAB_TEST_POSTGRES_DSN` / CI `postgres-integration`） | **1 live Postgres test passed**（含端到端 smoke） | 在真实 `postgres:16-alpine` 容器实例上验证 `Storage.from_dsn`、`psycopg_pool` 连接池、词法安全 SQL 翻译、**8 步版本化 `schema_migrations`**、`FOR UPDATE SKIP LOCKED` 队列抢占与 `pg_notify` 推式唤醒 |
+| `agent-lab eval` + `agent-lab eval --suite subsystems` | **17 / 17 通过（10 + 7）** | 10 项核心控制流离线场景（审批、拒绝、恢复、冲突、幂等、预算与三种模式）+ **7 大核心子系统离线评测**（自动滞回压缩保针、实时引导、延迟 MCP 检索、子 Agent 隔离、Dreaming 实证门控、Computer Use `ax_tree` 定位、SSRF 与 OS 沙箱防御） |
+| PR `#1`（`a674d9f`）远端 CI & 安全门禁 | **11 / 11 Checks 全绿** | 包含 GitHub Actions `test`（Python 3.11 & 3.12 全量测试 + Ruff + 17/17 评测 + KV 消融）、`frontend-gate`（JS 语法 + 零 HTML DOM Sink 静态门禁）、`postgres-integration`（真实 Postgres 16 集成）、`sandbox-smoke`（真实 Linux Docker 隔离探针 + 5/5 基准），以及 **GitGuardian** 密钥扫描零泄漏门禁 |
+| `pytest tests/test_git_ha.py tests/test_production_api_ha.py -q` | **16 passed（8 + 8）** | 专项高可用回归套件：跨节点 `workspace_archives` 防炸弹打包物化、单调世代拦截、原子 Git origin 初始化、全扩展名凭证拦截；多租户 RBAC、异人审批、滑动限流、请求体 413、`/healthz` & `/readyz` & `/metrics`、W3C `traceparent`、单事务 `approve_and_enqueue` 与协作取消 |
+| `ruff check src tests scripts` | 通过 | Python 静态检查（覆盖全部 43 个模块、47 个测试文件与 2 个脚本） |
+| `node --check web/app.js` + 零 HTML Sink 静态门禁 | 通过 | 浏览器脚本语法检查，并强制断言 `web/*.js` 中 `0` 处 `innerHTML` / `outerHTML` / `insertAdjacentHTML` / `document.write` |
 | `uv lock --check` | 通过 | 项目声明与锁文件一致 |
-| `agent-lab eval` | **10 / 10 场景通过** | 临时工作区中的审批、拒绝、恢复、冲突、幂等、预算与三种模式 |
 | `agent-lab kv-benchmark` | **累计块命中率 40.48% → 78.96%** | 2 子代理 + 16 步主循环离线消融：末步命中率达 **88.14%**，未命中 Prefill 减少 **66.82%**，预估有效输入成本节省 **57.27%**，滑动重排从 8 次降至 2 次（详见 [kv-cache-harness.md](kv-cache-harness.md) 与 [kv-cache-ablation-sample.json](kv-cache-ablation-sample.json)） |
-| `agent-lab model-eval --provider reference` | **5 / 5 真实容器基准通过** | 在本机 Docker Desktop（27.4.0）下逐任务检出 Git worktree、运行 21 个受保护 unittest 用例、覆盖跨文件原子修改与 1 次失败后自动修复、验证通过后创建 Git commit 并推进 `base_commit`（显式标注 `benchmark_harness_verification_only`） |
+| `agent-lab model-eval --provider reference` | **5 / 5 真实容器基准通过** | 在 Docker 环境下逐任务检出 Git worktree、运行 21 个受保护 unittest 用例、覆盖跨文件原子修改与 1 次失败后自动修复、验证通过后创建 Git commit 并推进 `base_commit`（显式标注 `benchmark_harness_verification_only`） |
 | `docker build -t agent-systems-lab .` | 通过 | 构建包含最小化 `git`、`uv sync --locked --no-dev`、非 root 账户 `learner`、内置 `/healthz` `HEALTHCHECK` 与非回环强制鉴权门禁的生产镜像 |
-| CLI 与队列服务操作 | 通过 | `serve --dispatch queue` + `agent-lab worker` 心跳消费与优雅停机、跨文件 `multi_file` 审批与恢复、`agent-lab gc` 资源与孤儿容器回收、trace/calls/result 查询 |
-| 浏览器与工作台接口 | 通过 | 队列 Worker 状态栏、任务模板选择、多语言 RepoMap 面板、带文件哈希绑定的工作记忆、跨文件增删改 unified diff、独立 `verification` 状态与增量事件时间线 |
-| MCP 协议集成 | 通过 | 独立进程 JSON-RPC 初始化、工具发现、读取/检索、路径越界拒绝、没有写工具 |
-| Anthropic / OpenAI adapter 合约 | 通过模拟测试 | Extended Thinking 缓存断点兼容、429 `Retry-After` 退避与备用网关切换、SSE 流式工具块拼装、截断 JSON 降级与加权缓存 token 折算；不等于真实在线计费联调 |
+| CLI、REPL、多协议网关、A2A 与队列服务 | 通过 | `serve --dispatch queue` + `agent-lab worker --metrics-port` 心跳消费与优雅停机、`gateway init/list/use` 热切换、`a2a init/list/card/send` 双向协同、`horizon` 战役与 `trigger` 定时/Webhook 调度、`agent-lab gc` 资源与孤儿容器回收 |
+| 浏览器与 Web 工作台 v11 接口 | 通过 | 纯 DOM 零 HTML Sink 渲染、事件驱动 SSE `/api/runs/{id}/stream`、`HttpOnly` Cookie 会话鉴权、吸顶审批条、3-Tab 右侧检视器、网关/A2A/触发器配置 Modal、`/rewind` 时间旅行回退与增量事件时间线 |
+| MCP 双向协议集成 | 通过 | 只读 MCP Server（独立进程 JSON-RPC 初始化、工具发现、路径越界拒绝、无写工具）与 MCP Client（延迟 `mcp_tool_search` 与 2025/2026 Sampling/Elicitation/Roots/Progress 双向回调） |
+| 多厂商 Provider 合约（Anthropic / OpenAI Chat & Responses / Gemini） | 通过模拟测试 | Extended Thinking 三断点缓存与 Context Editing、OpenAI Responses 加密推理与 `/responses/compact`、Gemini `cachedContents` TTL 续期、429 `Retry-After` 退避与备用网关切换、SSE 流式工具块拼装及加权缓存 token 与 USD 成本账本；不等于真实在线计费联调 |
 
 运行环境：macOS arm64，Python 3.11.5，Docker Desktop 27.4.0，支持 `inline` 单进程与 `queue` + `LeaseWorker` 双进程模式。完整可复演报告见 [evaluation-sample.json](evaluation-sample.json) 与 [model-eval-sample.json](model-eval-sample.json)；报告均不含密钥或个人仓库内容。
 
@@ -40,9 +47,9 @@
 - **macOS Docker Desktop 与原生 Linux 内核差异**：本机 Docker Desktop（LinuxKit VM）已实测通过全部单文件与多文件容器测试套件；而 `scripts/sandbox_smoke.py` 中的内核级探针专门针对原生 Linux CI 要求 `Seccomp == 2` 且网络命名空间仅含 `lo`（macOS LinuxKit VM 默认 `Seccomp: 0` 且内核静态编译了未启用的 `tunl0/sit0` 隧道设备），因此该严格探针保持不放宽，继续在 Ubuntu GitHub Actions CI 中强制门禁。
 - CI 包含 Python 3.11 / 3.12 的回归任务，以及真实 Docker smoke job；本次均已通过，后续提交仍以对应 GitHub Actions 结果为准。
 - 应用镜像 `docker build -t agent-systems-lab .` 已在本机实测构建成功；应用容器自身绝不挂载宿主机 `/var/run/docker.sock`，容器内触发沙盒验证通过 `AGENT_LAB_SANDBOX_URL` + `RemoteHTTPSandboxBackend` 对接独立受管沙盒池（`/api/internal/sandbox/execute`）。
-- 离线 demo 是确定性脚本；10 / 10 只证明当前 harness 场景回归，不代表模型成功率或真实缺陷覆盖率。
+- 离线 demo 是确定性脚本；17 / 17（10 项控制流 + 7 大子系统）只证明当前 harness 场景与子系统不变量回归，不代表模型成功率或真实缺陷覆盖率。
 - AST 算术 grader 不 import/exec 生成代码，只解释目标函数最后一条返回表达式的纯算术子集；不证明整个函数的控制流或副作用正确。
-- 存储层同时支持单机 SQLite WAL（含 `state_version` CAS 与 `summary_json` 投影）及 `Storage.from_dsn("postgresql://...")`（`FOR UPDATE SKIP LOCKED` 队列抢占 + `workspace_archives` 跨节点工作区物化同步）；当前自动化回归使用 SQLite 与契约桩验证 SQL 转换和并发隔离，真实跨主机 PostgreSQL 集群压测仍需按目标生产拓扑独立验收。
+- 存储层同时支持单机 SQLite WAL（含 `state_version` CAS 与 `summary_json` 投影）及 `Storage.from_dsn("postgresql://...")`（**8 步版本化迁移**、`psycopg_pool`、`FOR UPDATE SKIP LOCKED` 队列抢占、`pg_notify` 推式唤醒与 `workspace_archives` 跨节点工作区物化同步）；当前 CI `postgres-integration` 已通过真实 `postgres:16-alpine` 容器实例验证 1 项实时 PostgreSQL 集成测试与端到端 smoke，真实跨主机高并发 PostgreSQL 集群压测仍需按目标生产拓扑独立验收。
 
 ## 专门复核的失败情况
 
@@ -61,9 +68,19 @@
 
 增强后的真实容器检查由 `scripts/sandbox_smoke.py` 执行：业务bug/审批修复、只读与禁网探针、权限/seccomp、凭证不暴露、超时、超量输出、提前退出和清理。对应脱敏报告由CI上传为 `sandbox-smoke` artifact；本机仍为 `sandbox_unavailable`。本轮CI已全部通过，具体证据见下方。
 
-## 本轮增强的远端验证结果
+## 主干合并 PR `#1`（`a674d9f`）全量远端 CI & 安全门禁证据
 
-本次 P0/P1 全量升级的 [GitHub Actions 运行 42994021180](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42994021180)（对应代码提交 `cb969de`；上一阶段见 [42982653696](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42982653696)）在 Ubuntu Linux 上全部通过：
+PR `#1`（合并提交 `a674d9f`，交付全部 4 个批次 2026 前沿 Harness、多协议网关、双向 A2A、Web/CLI UX v11 与 8 步 Schema 迁移）在 GitHub Actions 与安全扫描上全部 **11 / 11 Checks 通过**：
+
+- **Ubuntu / Python 3.11 与 3.12（`test`）**：全部 **617 项离线测试**、Ruff 静态检查（`src tests scripts`）、**17 / 17 离线评测**（10 项核心控制流 + 7 大核心子系统 `agent-lab eval --suite subsystems`）与 KV Cache 离线消融实验（40.48% → 78.96%）全部通过。
+- **前端安全门禁（`frontend-gate`）**：Node.js 20 校验全部 `web/*.js` 语法并强制验证 `0` 处不安全 HTML DOM Sink（`innerHTML`/`outerHTML`/`insertAdjacentHTML`/`document.write`）。
+- **真实 PostgreSQL 集成（`postgres-integration`）**：在 `postgres:16-alpine` 服务容器上运行 **1 项真实 PostgreSQL 集成测试**与端到端 `Storage.from_dsn` 迁移 smoke，验证 `psycopg_pool`、8 步 `schema_migrations`、队列锁与 `pg_notify`。
+- **真实 Linux Docker 隔离探针与编码基准（`sandbox-smoke`）**：拉取 `python:3.12-slim` 执行 `scripts/sandbox_smoke.py` 全部 7 项内核隔离探针，并跑通 5 / 5 真实容器编码基准（`agent-lab model-eval --provider reference`）。
+- **密钥与供应链安全扫描（GitGuardian）**：全提交历史与新增 92 个变更文件零硬编码凭据泄漏，门禁全绿。
+
+## 历史阶段远端 CI 证据（P0/P1 里程碑）
+
+早期 P0/P1 升级阶段的 [GitHub Actions 运行 42994021180](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42994021180)（对应代码提交 `cb969de`；更早阶段见 [42982653696](https://github.com/CambridgeZ/agent-systems-lab/actions/runs/42982653696)）在 Ubuntu Linux 上全部通过：
 
 - Ubuntu / Python 3.11 与 3.12：全部 **273 项测试**、Ruff 检查（`src tests scripts`）和 10 个隔离离线场景通过。
 - 真实Docker：原始bug被捕获，审批后的修复通过四项受保护测试。

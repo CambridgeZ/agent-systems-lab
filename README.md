@@ -4,6 +4,10 @@
 
 项目受 [Anthropic 的 Agent 工程文章](https://www.anthropic.com/research/building-effective-agents)启发。20 篇文章的原文链接、代码对应位置和实现边界见 [阅读地图](docs/anthropic-reading-map.md)。源代码包含中文模块说明、关键决策注释与测试案例，便于逐步学习。
 
+> **全栈工程设计大典与前沿复盘导航（已验证基线：43 个 Python 模块 · 8 步 Schema 迁移 · 617 项离线 + 1 项真实 PostgreSQL 测试 · 17/17 离线评测 · PR `#1` `a674d9f` 11/11 CI & GitGuardian 全绿）**：
+> - **[7 卷全栈工程设计大典总导航（`docs/design/README.md`）](docs/design/README.md)** — 覆盖全部 48 个核心源码/脚本文件 + 2 个协议模板的源码级架构设计、文件→卷次速查表、4 条端到端请求生命周期全链路走读与按角色阅读路线。
+> - **[2026 前沿 Agent Harness 架构设计与复盘手册（`docs/frontier-harness-engineering.md`）](docs/frontier-harness-engineering.md)** — 4 个批次、12/12 前沿方案（Plan Mode、CaMeL/Egress DLP、三厂商原生缓存、模糊编辑、PTC、Horizon 战役、Shadow Workspace、Merkle 语义索引、Playwright ARIA、MCP/A2A、Brain/Hands 解耦、Cron/Webhook 与 Trace→Eval 飞轮）的完整设计权衡与复盘。
+
 ## 先运行，再读代码
 
 需要 Python 3.11+ 与 [uv](https://docs.astral.sh/uv/)。不需要模型密钥即可演示；零配置命令开箱即用。
@@ -84,7 +88,7 @@ uv run agent-lab kv-benchmark --report docs/kv-cache-ablation-sample.json
 | 跨会话分层记忆、互链 Wiki 与实证 Dreaming | 双层 `CLAUDE.md` + `MEMORY.md`（`<= 200` 行预载）+ `[[wiki-links]]` 图谱 + 四阶段离线 Dreaming：实证门控（无验证来源的 LLM 页强制降级 `hypothesis`）、已完成会话 `verified_facts` 自动晋升、排除软墓碑的衰减回收 GC 与加权排序、`dry_run` 预览与 `rollback_last_dream` 一键回滚 | [memory.py](src/agent_lab/memory.py)、[retrieval.py](src/agent_lab/retrieval.py)、[架构专题](docs/computer-use-and-memory-architecture.md) |
 | 多通道技能路由（Skills） | 多通道路由器（`/skill` 显式指令 + `paths`/`globs` 路径匹配 + BM25/TF-IDF/RRF 混合检索）、章节级按需加载/卸载、运行期动态置尾快照与版本去重 | [skills.py](src/agent_lab/skills.py)、[retrieval.py](src/agent_lab/retrieval.py)、[code-review](skills/code-review/SKILL.md) |
 | 多租户 RBAC、HttpOnly Cookie 与安全审计 | `AGENT_LAB_TOKENS_JSON` 多角色令牌、`HttpOnly` 会话 Cookie（`/api/auth/session`）、持久化 `security_audit_logs`（`GET /api/audit-logs`）、租户隔离、滑动窗口限流与双人复核 | [api.py](src/agent_lab/api.py)、[storage.py](src/agent_lab/storage.py)、[生产高可用专题](docs/production-ha-hardening.md) |
-| 长任务恢复、版本化迁移与生命周期 GC | 版本化 `schema_migrations`（6 步幂等迁移）、调用账本、worker checkpoint、`state_version` 乐观锁 CAS、跨节点 `workspace_archives` 快照、`agent-lab gc` 过期工作区与孤儿容器回收 | [storage.py](src/agent_lab/storage.py)、[runtime.py](src/agent_lab/runtime.py)、[execution_lock.py](src/agent_lab/execution_lock.py) |
+| 长任务恢复、版本化迁移与生命周期 GC | 版本化 `schema_migrations`（8 步幂等迁移）、调用账本、worker checkpoint、`state_version` 乐观锁 CAS、跨节点 `workspace_archives` 快照、`agent-lab gc` 过期工作区与孤儿容器回收 | [storage.py](src/agent_lab/storage.py)、[runtime.py](src/agent_lab/runtime.py)、[execution_lock.py](src/agent_lab/execution_lock.py) |
 | 持久队列、连接池、Fencing 与 DLQ | `run_leases` + `worker_nodes`、单事务 `approve_and_enqueue`、PostgreSQL `psycopg_pool` 连接池 + `FOR UPDATE SKIP LOCKED`、提案确定性 FIFO 排序（`fifo_seq`）、`epoch` 拦截僵尸写入与 `dead_letter` 毒丸隔离 | [lease.py](src/agent_lab/lease.py)、[storage.py](src/agent_lab/storage.py)、[生产高可用专题](docs/production-ha-hardening.md) |
 | 人工审批与崩溃原子性 | 审批绑定具体提案与各文件 SHA-256，跨文件写前日志（WAL）前滚恢复、重复应用幂等识别 | [tools.py](src/agent_lab/tools.py) |
 | 双进程防伪沙盒与远程池 | 外层 Supervisor 管道 HMAC 回执 + 子进程 `sys.addaudithook` 阻断栈帧/`ctypes` 伪造；原生兼容 `src/` 布局与 `pytest` 风格函数测试；支持 `RemoteHTTPSandboxBackend` | [sandbox.py](src/agent_lab/sandbox.py)、[沙盒专题](docs/sandbox-mechanisms.md) |
@@ -186,17 +190,19 @@ flowchart LR
 ## 学习顺序
 
 1. [5 分钟演示手册](docs/demo-walkthrough.md)：运行、审批、拒绝、恢复、看轨迹。
-2. [**7 幅 Excalidraw 系统架构图集**](docs/diagrams/README.md)：按模块对照源码交互式走读全栈控制流与数据流。
-3. [14 天学习路线](docs/learning-path.md)：每天读什么、改什么、怎样验证。
-4. [系统架构与设计取舍](docs/architecture.md)：先读状态机，再沿模块接口看实现。
-5. [**本地操控、实时引导、多通道技能/MCP、子 Agent 与分层 Dreaming 架构专题**](docs/computer-use-and-memory-architecture.md)：三级权限矩阵、运行期 `run_steering_messages` 零锁竞争实时引导与 `waiting_approval` 转向接管、macOS CoreGraphics 64 位 FFI、多通道技能路由器、阈值门控 `mcp_tool_search`、Anthropic 四要素子 Agent 契约与四阶段离线 Dreaming。
-6. [**生产级高可用、多租户安全与沙盒加固专题**](docs/production-ha-hardening.md)：Epoch Fencing、DLQ 毒丸隔离、多文件写前日志（WAL）前滚恢复、双进程 HMAC 防伪沙盒、多租户 RBAC/双人复核与 Prometheus/W3C 可观测性。
-7. [20 篇 Anthropic 文章对应地图](docs/anthropic-reading-map.md)：每篇对应机制、代码和未实现部分。
-8. [44 道基础面试问题](docs/interview-guide.md) + [36 道进阶补充](docs/interview-supplement.md)：加上[沙盒专题 8 题（81—88）](docs/sandbox-mechanisms.md)，共 88 题，覆盖协议、上下文、Skill、恢复、代码检索、评测、成本与隔离机制。
-9. [长上下文、Skill 与工具状态专项说明](docs/context-skills-state.md)：压缩规则、崩溃窗口、可复制实验和高可用边界。
-10. [Harness 级 KV Cache 命中率优化原理](docs/kv-cache-harness.md)：为什么代码 Agent 必须做前缀对齐、RoPE 与链式块哈希失效原理、6 项落地机制与消融数据。
-11. [沙盒机制与隔离探针](docs/sandbox-mechanisms.md)：文件/网络/资源边界、双进程防伪回执、远程执行池与可信度局限。
-12. [验证记录](docs/validation.md)：交付时实际运行了什么，哪些需要额外环境。
+2. [**7 卷全栈工程设计大典总导航 (`docs/design/README.md`)**](docs/design/README.md)：按模块逐行核验的 7 卷架构详述、全仓 48 个核心源码文件（+2 个模板）→ 卷次速查表、4 条跨卷端到端生命周期走读与按角色阅读路线。
+3. [**2026 前沿 Agent Harness 架构设计与复盘手册 (`docs/frontier-harness-engineering.md`)**](docs/frontier-harness-engineering.md)：4 批次 12/12 前沿能力的设计选型、安全不变量与分批深度复盘。
+4. [**7 幅 Excalidraw 系统架构图集**](docs/diagrams/README.md)：按模块对照源码交互式走读全栈控制流与数据流。
+5. [14 天学习路线](docs/learning-path.md)：每天读什么、改什么、怎样验证。
+6. [系统架构与设计取舍](docs/architecture.md)：先读状态机，再沿模块接口看实现。
+7. [**本地操控、实时引导、多通道技能/MCP、子 Agent 与分层 Dreaming 架构专题**](docs/computer-use-and-memory-architecture.md)：三级权限矩阵、运行期 `run_steering_messages` 零锁竞争实时引导与 `waiting_approval` 转向接管、macOS CoreGraphics 64 位 FFI、多通道技能路由器、阈值门控 `mcp_tool_search`、Anthropic 四要素子 Agent 契约与四阶段离线 Dreaming。
+8. [**生产级高可用、多租户安全与沙盒加固专题**](docs/production-ha-hardening.md)：Epoch Fencing、DLQ 毒丸隔离、多文件写前日志（WAL）前滚恢复、双进程 HMAC 防伪沙盒、多租户 RBAC/双人复核与 Prometheus/W3C 可观测性。
+9. [20 篇 Anthropic 文章对应地图](docs/anthropic-reading-map.md)：每篇对应机制、代码和未实现部分。
+10. [44 道基础面试问题](docs/interview-guide.md) + [36 道进阶补充](docs/interview-supplement.md)：加上[沙盒专题 8 题（81—88）](docs/sandbox-mechanisms.md)，共 88 题，覆盖协议、上下文、Skill、恢复、代码检索、评测、成本与隔离机制。
+11. [长上下文、Skill 与工具状态专项说明](docs/context-skills-state.md)：压缩规则、崩溃窗口、可复制实验和高可用边界。
+12. [Harness 级 KV Cache 命中率优化原理](docs/kv-cache-harness.md)：为什么代码 Agent 必须做前缀对齐、RoPE 与链式块哈希失效原理、6 项落地机制与消融数据。
+13. [沙盒机制与隔离探针](docs/sandbox-mechanisms.md)：文件/网络/资源边界、双进程防伪回执、远程执行池与可信度局限。
+14. [验证记录](docs/validation.md)：交付时实际运行了什么，哪些需要额外环境。
 
 阅读代码建议从 `AgentRuntime.start → execute → Provider.complete → ToolRegistry.execute` 开始，接着看审批与恢复测试。避免只背术语；能解释失败场景更有说服力。
 
@@ -354,7 +360,7 @@ docker run --rm -p 127.0.0.1:8765:8765 agent-systems-lab
 
 ## 实现范围
 
-这是面向学习、系统设计面试与生产高可用演进验证的**可运行代码 Agent 工程**。全部核心不变量均有自动化测试覆盖（包含单元/并发故障注入测试、10 项离线控制流回归、**7 大核心子系统离线评测** `run_subsystem_evals`、5 项真实 Git worktree + Docker 编码基准、无偏 `pass@k`、`LLMJudge`、SWE-bench 适配器与 KV Cache 消融实验），详见[生产高可用加固专题](docs/production-ha-hardening.md)与[验证记录](docs/validation.md)。当前仍需如实区分的工程边界：
+这是面向学习、系统设计面试与生产高可用演进验证的**可运行代码 Agent 工程**（当前主干基线：**43 个 Python 模块**、**8 步 `schema_migrations`**、**617 项离线测试 + 1 项真实 PostgreSQL 集成测试**、**17 / 17 核心与子系统离线评测**、PR `#1` `a674d9f` **11 / 11 CI & GitGuardian 门禁全绿**）。全部核心不变量均有自动化测试覆盖（包含单元/并发故障注入测试、10 项离线控制流回归、**7 大核心子系统离线评测** `run_subsystem_evals`、5 项真实 Git worktree + Docker 编码基准、无偏 `pass@k`、`LLMJudge`、SWE-bench 适配器、Trace→Eval 飞轮与 KV Cache 消融实验），详见 [7 卷全栈工程设计大典](docs/design/README.md)、[2026 前沿 Harness 复盘手册](docs/frontier-harness-engineering.md)、[生产高可用加固专题](docs/production-ha-hardening.md) 与 [验证记录](docs/validation.md)。当前仍需如实区分的工程边界：
 
 - **评测诚实性**：仓库内置 `demo` 与 `reference` 结果仅证明 harness 与沙盒闭环无误；未在无外部 API 密钥的 CI 中冒充真实 Claude / OpenAI 编码得分。
 - **单机 SQLite 默认开箱 vs 跨节点 PostgreSQL 集群**：`Storage` 原生内置版本化 `schema_migrations`、`PostgresBackendConfig`（`psycopg_pool` 连接池、`FOR UPDATE SKIP LOCKED` 队列锁、FIFO `fifo_seq` 提案顺序、`state_version` 乐观锁 CAS、单调 `epoch` fencing、`dead_letter` 死信队列与 `workspace_archives` 快照表），默认零配置使用本地 SQLite WAL；跨机生产部署需配置外部 PostgreSQL 实例与独立远程沙盒池。

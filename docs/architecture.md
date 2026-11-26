@@ -2,7 +2,11 @@
 
 本项目让一个代码修复任务经过读取证据、提出补丁、人工审批、应用与验证。模型负责选择工具；执行框架负责校验、权限、状态和资源边界。学习重点是两者如何配合，而非把模型回复直接当成完成事实。
 
-当前范围覆盖 **本机单进程内联模式（`inline`）与多进程/跨节点持久队列模式（`queue`，支持 SQLite WAL 或 PostgreSQL DSN + `psycopg_pool` 连接池）、隔离沙箱仓库（`sandbox`）与本地直连/桌面 GUI 工作台（`host` / `computer`）**。CLI 和网页既支持复制 `data/sample_repo`、为 `data/multi_file_repo` 或 `--repo` 创建隔离的分离 HEAD Git worktree，也支持通过 `agent-lab code`（或 `--cwd`）在三级权限档位（`ask` / `auto-edit` / `full-auto`）、信任门控的声明式 `.agent-lab/settings.json` 规则、确定性生命周期钩子（`hooks.py`）与 OS 内核级 `HostKernelSandbox`（macOS Seatbelt SBPL / Linux `bwrap`）保护下直接操控本地目录、驱动常驻 PTY 后台进程、调用 LSP 语义智能与 SSRF 防护联网工具、接入端到端 SSE 流式（`RunStreamBroker`）与 `/rewind` 轮次检查点回退，并在会话结束后自动运行实证门控的四阶段离线 Dreaming（支持 `dry_run` 预览与 `rollback_last_dream` 回滚）。关于租约接管、死信队列、崩溃前滚恢复、多租户 RBAC 与沙盒防伪加固见 [生产级高可用与安全加固专题](production-ha-hardening.md)；关于本地操控、端到端流式、OS 沙箱/钩子、子 Agent 与分层 Dreaming 记忆的深度设计见 [本地操控、桌面 GUI、MCP 与分层记忆架构专题](computer-use-and-memory-architecture.md)。
+当前范围覆盖 **本机单进程内联模式（`inline`）与多进程/跨节点持久队列模式（`queue`，支持 SQLite WAL 或 PostgreSQL DSN + `psycopg_pool` 连接池）、隔离沙箱仓库（`sandbox`）与本地直连/桌面 GUI 工作台（`host` / `computer`）**。CLI 和网页既支持复制 `data/sample_repo`、为 `data/multi_file_repo` 或 `--repo` 创建隔离的分离 HEAD Git worktree，也支持通过 `agent-lab code`（或 `--cwd`）在四级权限档位（`ask` / `auto-edit` / `full-auto` / `plan`）、信任门控的声明式 `.agent-lab/settings.json` 规则、确定性生命周期钩子（`hooks.py`）、CaMeL/Egress DLP 防泄漏与 OS 内核级 `HostKernelSandbox`（macOS Seatbelt SBPL / Linux `bwrap`）保护下直接操控本地目录、驱动常驻 PTY 后台进程、调用 LSP 语义智能与 SSRF 防护联网工具、接入端到端 SSE 流式（`RunStreamBroker`）与 `/rewind` 轮次检查点回退，并在会话结束后自动运行实证门控的四阶段离线 Dreaming（支持 `dry_run` 预览与 `rollback_last_dream` 回滚）。关于租约接管、死信队列、崩溃前滚恢复、多租户 RBAC 与沙盒防伪加固见 [生产级高可用与安全加固专题](production-ha-hardening.md)；关于本地操控、端到端流式、OS 沙箱/钩子、子 Agent 与分层 Dreaming 记忆的深度设计见 [本地操控、桌面 GUI、MCP 与分层记忆架构专题](computer-use-and-memory-architecture.md)。
+
+> **深度工程设计大典与 2026 前沿复盘（已验证主干基线：43 个 Python 模块 · 8 步 `schema_migrations` · 617 项离线 + 1 项真实 PostgreSQL 测试 · 17/17 核心与子系统评测 · PR `#1` `a674d9f` 11/11 CI & GitGuardian 全绿）**：
+> - **[7 卷全栈工程设计大典总导航 (`docs/design/README.md`)](design/README.md)** — 完整映射全部 48 个源码/脚本文件 + 2 个协议模板的源码级架构详解、4 条跨卷端到端请求生命周期走读与按角色阅读路径。
+> - **[2026 前沿 Agent Harness 架构设计与复盘手册 (`docs/frontier-harness-engineering.md`)](frontier-harness-engineering.md)** — 4 批次 12/12 前沿方案（Plan Mode、CaMeL/Egress DLP、三厂商原生上下文工程、模糊编辑、PTC、Horizon 战役、Shadow Workspace、Merkle 代码索引、Playwright ARIA、MCP/A2A、Brain/Hands 解耦、Cron/Webhook 与 Trace→Eval 飞轮）的深度复盘。
 
 > **交互式全栈架构图集（7 幅 Excalidraw 画布）**：仓库在 [`docs/diagrams/README.md`](diagrams/README.md) 中提供与源码一一对应的 7 幅 Excalidraw v2 架构图（支持 VS Code/Cursor Excalidraw 插件、[excalidraw.com](https://excalidraw.com) 或 Obsidian 打开编辑）：
 > - [`01-system-overview.excalidraw`](diagrams/01-system-overview.excalidraw) — 全景五平面系统架构总览
@@ -60,17 +64,23 @@ flowchart LR
 | 多语言代码地图 | 512 KiB 解析上限、可选 `tree_sitter_language_pack` 多语言 AST 与确定性 Personalized PageRank 如何排序？ | [`repomap.py`](../src/agent_lab/repomap.py) |
 | 会话内工作记忆 | 裁剪旧历史后如何保留追踪 `bound_files` 源码哈希、支持显式删除且自动判旧的事实？ | [`working_memory.py`](../src/agent_lab/working_memory.py) |
 | KV 缓存优化 | 如何通过瞬态置尾、阶梯水位压缩与共享工具前缀避免级联重算？ | [`kv_cache.py`](../src/agent_lab/kv_cache.py)、[专题文档](kv-cache-harness.md) |
-| 模型适配、流式、路由与成本账本 | Anthropic `messages.stream()`、OpenAI SSE + `reasoning_content`、`fast`/`inherit`/`reasoning` 模型路由、瞬态图像附件、USD 成本账本与 RPM/TPM 限流如何实现？ | [`providers.py`](../src/agent_lab/providers.py) |
-| 工具层与写前日志 | 分档能力挂载、跨文件 `modify/create/delete` WAL 前滚恢复与动作提案幂等怎样校验？ | [`tools.py`](../src/agent_lab/tools.py) |
-| 存储层与版本化迁移 | 6 步版本化 `schema_migrations`、PostgreSQL `psycopg_pool` 连接池、提案 FIFO `fifo_seq`、`run_checkpoints` 与 `security_audit_logs` 如何协同？ | [`storage.py`](../src/agent_lab/storage.py) |
+| 模型适配、多协议网关、流式与成本账本 | 5 协议模型适配器（`Demo`/`Anthropic`/`OpenAI Chat`/`OpenAI Responses`/`Gemini`）、三厂商原生上下文/缓存工程、声明式 `gateways.json` 热切换、`fast`/`inherit`/`reasoning` 路由、USD 成本账本与 RPM/TPM 限流如何实现？ | [`providers.py`](../src/agent_lab/providers.py)、[`gateways.py`](../src/agent_lab/gateways.py) |
+| 工具层、写前日志与脑手解耦执行后端 | 分档能力挂载、跨文件 `modify/create/delete` WAL 前滚恢复、动作提案幂等，以及 Local/Docker/MicroVM `WorkspaceExecutionBackend` 与 `TurnPipeline` 洋葱中间件怎样协同？ | [`tools.py`](../src/agent_lab/tools.py)、[`execution_backend.py`](../src/agent_lab/execution_backend.py)、[`turn_pipeline.py`](../src/agent_lab/turn_pipeline.py) |
+| CaMeL 污点追踪与出站密文防泄漏 | 14 类密文正则 + 多层解码视图的 `EgressDlpInspector` 与 `TaintRegistry` 如何在 Bash/Web/MCP/A2A/Browser 出站边界阻断间接提示词注入外泄？ | [`egress_dlp.py`](../src/agent_lab/egress_dlp.py) |
+| PTC 编排、Shadow Workspace 与 Horizon 战役 | 本地双通道 FD 隔离 `ptc_exec`、APFS CoW 写前推测性验证 `shadow_verify_edits`、跨会话不可篡改 `feature_list.json` 与机械化架构边界 Lint 如何运行？ | [`ptc.py`](../src/agent_lab/ptc.py)、[`shadow_workspace.py`](../src/agent_lab/shadow_workspace.py)、[`horizon.py`](../src/agent_lab/horizon.py) |
+| Headless Playwright ARIA 浏览器层 | 基于 ARIA 无障碍 Ref 快照定位、Console/Network 观测与 SSRF/IMDS 护栏的 Web 操控如何与原生桌面 `computer.py` 互补？ | [`browser.py`](../src/agent_lab/browser.py) |
+| 持久化 Merkle 语义代码索引 | SQLite WAL 持久化 Merkle-Tree 增量 AST 分块与 `codebase_semantic_search` 如何避免大仓重启全量重算？ | [`code_index.py`](../src/agent_lab/code_index.py) |
+| 存储层、版本化迁移与自主触发器 | **8 步版本化 `schema_migrations`（16 张表）**、PostgreSQL `psycopg_pool` + `pg_notify` 推式唤醒、提案 FIFO `fifo_seq`、`run_checkpoints`、`security_audit_logs` 与 Cron/Webhook HMAC 触发引擎如何协同？ | [`storage.py`](../src/agent_lab/storage.py)、[`triggers.py`](../src/agent_lab/triggers.py) |
 | 两级上下文压缩 | Tier-1 `micro_compact_messages` + Tier-2 `80%→55%` 滞回压缩、同拍原位 `COMPACTION_SUMMARY` 与可选 LLM 语义摘要怎样运行？ | [`context.py`](../src/agent_lab/context.py) |
 | 统一混合检索与神经适配器 | 围栏安全切块、BM25 + RRF 及可插拔 `LocalSubwordDenseEmbedder`/`OpenAICompatibleEmbedder`/`HttpReranker` 如何组合？ | [`retrieval.py`](../src/agent_lab/retrieval.py) |
 | 技能 | 怎样经 `/skill` + `paths`/`globs` + RRF 多通道路由、按章节加载并将运行期动态技能置尾？ | [`skills.py`](../src/agent_lab/skills.py) |
 | 沙盒与远程执行池 | 双进程管道 HMAC 回执如何防伪造、`RemoteHTTPSandboxBackend` 与孤儿容器回收如何工作？ | [`sandbox.py`](../src/agent_lab/sandbox.py)、[沙盒专题](sandbox-mechanisms.md) |
 | 层次化可观测性 | W3C `traceparent` + 层次化 OTLP Span（`start_span` / `AGENT_LAB_OTLP_ENDPOINT`）、脱敏日志与 Prometheus 指标如何实现？ | [`observability.py`](../src/agent_lab/observability.py) |
-| 服务层与多租户安全 | 多租户 RBAC、`HttpOnly` Cookie 会话鉴权、`security_audit_logs`、事件驱动 SSE `/api/runs/{id}/stream`、`/rewind`、图像附件与 `/api/memory/dream/*` 如何暴露？ | [`api.py`](../src/agent_lab/api.py) |
-| MCP Server | 怎样把相同只读工具（含 `repo_map`/`symbol_search`）暴露给标准协议客户端？ | [`mcp_server.py`](../src/agent_lab/mcp_server.py) |
-| 评测体系 | 10 项控制流回归 + 7 大核心子系统离线评测 + 5 项 Docker 编码基准 + 无偏 `pass@k` + `LLMJudge` + SWE-bench 适配器怎样分层评分？ | [`evals.py`](../src/agent_lab/evals.py)、[`model_evals.py`](../src/agent_lab/model_evals.py) |
+| 服务层与多租户安全 | 多租户 RBAC、`HttpOnly` Cookie 会话鉴权、`security_audit_logs`、事件驱动 SSE `/api/runs/{id}/stream`、`/rewind`、图像附件、触发器与 `/api/memory/dream/*` 如何暴露？ | [`api.py`](../src/agent_lab/api.py) |
+| 开放协作协议（MCP Server + 双向 A2A） | 只读 `mcp_server.py` 与支持 AgentCard / JSON-RPC 2.0 SSE / HMAC Push Webhook 的双向 `a2a.py` 如何实现跨智能体互联？ | [`mcp_server.py`](../src/agent_lab/mcp_server.py)、[`a2a.py`](../src/agent_lab/a2a.py) |
+| 评测体系与 Trace→Eval 回归飞轮 | **17 / 17** 离线评测（10 项控制流回归 + 7 大核心子系统离线评测）+ 5 项 Docker 编码基准 + 无偏 `pass@k` + `LLMJudge` + SWE-bench 适配器 + 4 维轨迹评分与双脱敏回归采集飞轮怎样分层评分？ | [`evals.py`](../src/agent_lab/evals.py)、[`model_evals.py`](../src/agent_lab/model_evals.py)、[`eval_flywheel.py`](../src/agent_lab/eval_flywheel.py) |
+
+> 完整 **43 个 `src/agent_lab/*.py` 模块 + 3 个 `web/*` 文件 + 2 个 `scripts/*.py` 脚本 + 2 个协议模板** 的一对一源码→卷次查找表见 [7 卷全栈工程设计大典总导航 (`docs/design/README.md`)](design/README.md)。
 
 ## 2. 三种编排模式、并发工具波次、增强子 Agent 与三档执行环境
 
@@ -149,7 +159,7 @@ stateDiagram-v2
 
 | 记录 | 保存内容 | 作用与边界 |
 |---|---|---|
-| `schema_migrations` | 迁移版本号（`1`–`6`）、名称与执行时间 | 幂等版本化 Schema 演进（核心表基线、`proposals.fifo_seq`、`run_checkpoints`、`security_audit_logs`、`events` `trace_id`/`span_id`、会话重命名/归档/分叉与游标分页） |
+| `schema_migrations` | 迁移版本号（`1`–`8`）、名称与执行时间 | 幂等版本化 Schema 演进（`1` 核心表基线、`2` `proposals.fifo_seq`、`3` `run_checkpoints`、`4` `security_audit_logs`、`5` `events` `trace_id`/`span_id`、`6` 会话重命名/归档/分叉与游标分页、`7` A2A `a2a_context_id` 索引与 `a2a_push_configs`、`8` `trigger_definitions` 与 `trigger_fires` 防重放表，共 16 张物理表） |
 | `runs` | 完整状态 `body`、单调递增 `state_version`、索引列 `tenant_id` / `status_col` / `updated_at_col`、会话管理列（标题/归档/父分叉）与轻量投影 `summary_json` | `save_run` 执行 `WHERE id=? AND state_version=?` 乐观锁 CAS 防并发丢更新；`append_user_turn` 自动闭合悬空 `tool_use` 并线性延展预算；`list_runs` 直接读取 `summary_json` 并支持游标分页与搜索过滤 |
 | `run_steering_messages` | 运行中零 CAS 争用实时引导指令收件箱 | 纯追加写入，规避与活跃 Worker `runs.state_version` 写入冲突，在工具步闭合安全边界原子排空注入 |
 | `run_checkpoints` | 轮次索引、消息截断位置、内容寻址 pre-edit 文件快照清单（SHA-256 Blob 存于 `<state_dir>/checkpoints/`） | 支撑 `/rewind` 按 `both`/`files`/`messages` 三模式时间旅行回退 |
@@ -161,8 +171,10 @@ stateDiagram-v2
 | `security_audit_logs` | 租户、操作者 `actor_id`、事件类型、资源目标、决策结果、`trace_id` 与结构化审计载荷 | 持久记录登录/登出、审批决策、规则变更、回退与管理 GC 等高敏安全操作（`GET /api/audit-logs`） |
 | `memories` + 双层记忆目录 | 数据库人工 KV 偏好 + `.agent-lab/memory/<tenant>/` 下的 `global` 与 `projects/<slug>` 双层 `CLAUDE.md`/`MEMORY.md`（`<=200` 行）、`[[wiki-links]]` 主题页、`.archive/` 回收区与 Dreaming 回滚快照 | 租户隔离的跨会话持久认知图谱；`sandbox` 仅只读人工 KV，`host`/`computer` 支持实证门控写入与离线四阶段 Dreaming 巩固 |
 | `dream_runs` | `dream_id`、`tenant_id`、`project_slug`、`run_id`、`trigger`、四阶段统计与完整 JSON 审计报告 | 独立记录每次会话后自动或手动触发的离线记忆整理轨迹，不占用主任务队列与并发槽位 |
+| `a2a_push_configs` | `run_id`、Push Webhook `url`、HMAC 签名凭证与启用标志（Migration `#7`） | 支撑 A2A 异步任务状态变更时的 HMAC 防伪推送回调（配合 `runs.a2a_context_id` 索引实现 $O(\log N)$ 上下文检索） |
+| `trigger_definitions` / `trigger_fires` | 自主 Cron 表达式 / Webhook 定义、去重键与触发历史记录（Migration `#8`） | 保障定时触发与 GitHub/自定义 Webhook 投递在多节点重启或重试下具备原子幂等防重放语义 |
 
-存储层通过 `Storage.from_dsn` 支持双后端透明切换，并统一通过 6 步版本化 `schema_migrations` 完成幂等升级：默认使用本地 SQLite 文件（开启 `WAL`、`busy_timeout=10000`、可配置 `AGENT_LAB_SQLITE_SYNC` 默认 `NORMAL`，建表与迁移在并发 Barrier 下带退避重试）；当配置 `AGENT_LAB_STORAGE_DSN=postgresql://...` 且安装 `psycopg` 时，自动切换至 `PostgresBackendConfig` 与 `_PostgresConnectionAdapter`，优先惰性初始化实例级 **`psycopg_pool.ConnectionPool` 连接池**（缺失 `psycopg_pool` 或 `pool_size<=0` 时优雅回退直连），并将队列领取升级为 `SELECT ... FOR UPDATE SKIP LOCKED`，使多副本 `agent-lab worker` 与无状态 API 节点可在共享 PostgreSQL 上无锁竞争消费并复用同一套 `epoch` fencing、`state_version` CAS、`fifo_seq` 与 `workspace_archives` 协议。生命周期回收命令 `agent-lab gc`（或 `POST /api/admin/gc`）按保留窗口统一清理终态临时工作区/Git worktree、`workspace_archives` 快照与陈旧锁文件，并对 `direct_workspace=True` 的用户真实本地仓库实施绝对删除豁免。
+存储层通过 `Storage.from_dsn` 支持双后端透明切换，并统一通过 **8 步版本化 `schema_migrations`** 完成幂等升级：默认使用本地 SQLite 文件（开启 `WAL`、`busy_timeout=10000`、可配置 `AGENT_LAB_SQLITE_SYNC` 默认 `NORMAL`，建表与迁移在并发 Barrier 下带退避重试）；当配置 `AGENT_LAB_STORAGE_DSN=postgresql://...` 且安装 `psycopg` 时，自动切换至 `PostgresBackendConfig` 与 `_PostgresConnectionAdapter`，优先惰性初始化实例级 **`psycopg_pool.ConnectionPool` 连接池**（缺失 `psycopg_pool` 或 `pool_size<=0` 时优雅回退直连），并将队列领取升级为 `SELECT ... FOR UPDATE SKIP LOCKED` 配合 `pg_notify('agent_lab_queue', ...)` 推式唤醒，使多副本 `agent-lab worker` 与无状态 API 节点可在共享 PostgreSQL 上无锁竞争消费并复用同一套 `epoch` fencing、`state_version` CAS、`fifo_seq` 与 `workspace_archives` 协议。生命周期回收命令 `agent-lab gc`（或 `POST /api/admin/gc`）按保留窗口统一清理终态临时工作区/Git worktree、`workspace_archives` 快照与陈旧锁文件，并对 `direct_workspace=True` 的用户真实本地仓库实施绝对删除豁免。
 
 ## 6. 上下文、技能、双系统记忆、代码智能与检索各负责什么
 
@@ -179,7 +191,7 @@ stateDiagram-v2
 | `verify_python` | 对文件调用 `ast.parse`，不导入或运行 | 业务计算正确、测试通过、代码无副作用 |
 | `HostKernelSandbox`（宿主机 OS 内核沙箱） | 对 `host`/`computer` 档位 `bash_exec` 在 macOS 自动注入 Seatbelt SBPL（`sandbox-exec`）、在 Linux 通过 `bwrap` 隔离，限制仅工作区/临时目录可写并屏蔽敏感家目录与可选网络（`AGENT_LAB_HOST_SANDBOX=auto\|strict\|off`）；配合 SSRF 防护 `web_fetch`/`web_search` | 替代不可信多租户代码执行的容器/微虚拟机边界 |
 | 双进程防伪 `sandbox_test` / 远程沙盒池 | 固定 64 位 image ID、只读快照、禁网/非 root/资源上限；外层 Supervisor 持随机 32 字节密钥经专用匿名管道校验子进程 HMAC-SHA256 回执并清洗标准输出伪造标记，子进程通过 `sys.addaudithook` 阻断 `ctypes`/`gc`/`sys._getframe` 探测；支持 `RemoteHTTPSandboxBackend` 转发与孤儿容器回收 | 抵御宿主机 Linux 内核级容器逃逸漏洞（高敌对多租户仍需 gVisor / Firecracker 微虚拟机） |
-| 离线与真实基准评测（`evals.py` + `model_evals.py`） | 10 项控制流回归 + **7 大核心子系统离线评测**（`run_subsystem_evals`：自动滞回压缩保针、实时引导、延迟 MCP 检索、子 Agent 隔离、Dreaming 证伪与实证门控、Computer Use `ax_tree` 定位、SSRF 与 OS 沙箱防御）+ 5 项 Git/Docker 编码基准 + **无偏 `pass@k`（`estimate_pass_at_k`）+ `LLMJudge` + SWE-bench 适配器（`FAIL_TO_PASS`/`PASS_TO_PASS`）** | 离线 `demo`/`reference` 得分不代表真实 LLM 编码能力 |
+| 离线与真实基准评测（`evals.py` + `model_evals.py` + `eval_flywheel.py`） | **617 项离线测试 + 1 项真实 PostgreSQL 集成测试** + **17 / 17 离线评测**（10 项控制流回归 + **7 大核心子系统离线评测** `run_subsystem_evals`：自动滞回压缩保针、实时引导、延迟 MCP 检索、子 Agent 隔离、Dreaming 证伪与实证门控、Computer Use `ax_tree` 定位、SSRF 与 OS 沙箱防御）+ 5 项 Git/Docker 编码基准 + **无偏 `pass@k`（`estimate_pass_at_k`）+ `LLMJudge` + SWE-bench 适配器 + 4 维 Trace→Eval 回归飞轮**（PR `#1` `a674d9f` 11/11 CI & GitGuardian 全绿） | 离线 `demo`/`reference` 得分不代表真实 LLM 编码能力 |
 
 本地 Docker 路径要求守护进程可用且已有 `python:3.12-slim`（工具绝不自动联网拉镜像）；当配置 `AGENT_LAB_SANDBOX_URL`（与可选 `AGENT_LAB_SANDBOX_TOKEN`）时，`SandboxRunner` 将完成本地防符号链接快照与 `test_oracles` 校验后的文件集通过 `RemoteHTTPSandboxBackend` 发送至隔离沙盒节点的 `POST /api/internal/sandbox/execute`，避免向 Web/Worker 容器挂载宿主机 Docker socket。每个受管容器均打上 `agent-lab.managed=1` 与 `agent-lab.expires-at` 标签，`reap_orphan_containers`（集成于 `agent-lab gc` 与 `/api/admin/gc`）可主动清理进程崩溃遗留的超期孤儿容器。详见[沙盒专题](sandbox-mechanisms.md)与[验证记录](validation.md)。
 
@@ -206,4 +218,4 @@ API 服务层现已内置多租户安全控制（详见 [**生产级高可用、
 3. **跨节点高可用与死信隔离**：版本化 `schema_migrations` + `PostgresBackendConfig`（`psycopg_pool` 连接池 + `FOR UPDATE SKIP LOCKED`）+ 提案 FIFO `fifo_seq` + 单调 `epoch` fencing + `state_version` 乐观锁 + `workspace_archives` + 超限接管 `dead_letter` 隔离毒丸任务。
 4. **后续面向超大规模企业集群的演进方向**：将静态 JSON 令牌升级为 OIDC/JWT 短期令牌与 KMS 密钥轮换；为远程沙盒工作节点引入 gVisor (`runsc`) 或 Firecracker 微虚拟机隔离；将 `workspace_archives` 大体积快照外置至 S3 兼容对象存储。
 
-对应的文章、面试追问与练习见 [本地操控、桌面 GUI、MCP 与分层记忆架构专题](computer-use-and-memory-architecture.md)、[生产高可用加固专题](production-ha-hardening.md)、[阅读地图](anthropic-reading-map.md)、[面试指南](interview-guide.md) 与 [14 天学习路线](learning-path.md)。
+对应的源码级大典、前沿复盘、文章、面试追问与练习见 [7 卷全栈工程设计大典总导航](design/README.md)、[2026 前沿 Agent Harness 架构设计与复盘手册](frontier-harness-engineering.md)、[本地操控、桌面 GUI、MCP 与分层记忆架构专题](computer-use-and-memory-architecture.md)、[生产高可用加固专题](production-ha-hardening.md)、[阅读地图](anthropic-reading-map.md)、[面试指南](interview-guide.md) 与 [14 天学习路线](learning-path.md)。
